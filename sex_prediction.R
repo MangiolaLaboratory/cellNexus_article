@@ -22,7 +22,8 @@ required_pkgs <- c(
   "future",       # Alternative parallel backend
   "future.apply",  # Future-based parallel apply
   "tidySummarizedExperiment",
-  "tidyprint"
+  "tidyprint",
+  "stringr"
 )
 
 for (pkg in required_pkgs) {
@@ -458,11 +459,7 @@ build_sex_prediction_model <- function(se,
     # Center and scale all numeric predictors (gene expression)
     step_normalize(all_numeric_predictors()) %>%
     # Remove highly correlated predictors to reduce overfitting
-    step_corr(all_numeric_predictors(), threshold = 0.95) %>%
-    # Optional: PCA for dimensionality reduction (adjust for small sample size)
-    step_pca(all_numeric_predictors(), 
-             num_comp = min(10, floor(nrow(train_data) * 0.5), ncol(expr_data) - 1),
-             threshold = 0.95)
+    step_corr(all_numeric_predictors(), threshold = 0.95)
   
   # Define random forest model with tuning
   if (is.null(mtry)) {
@@ -780,31 +777,25 @@ sex_model_results <- build_sex_prediction_model(
 )
 
 
-#=== Model Performance ===
-#Cross-validation results (mean ± sd):
-# A tibble: 4 × 6
-#  .metric     .estimator  mean     n  std_err .config             
-#  <chr>       <chr>      <dbl> <int>    <dbl> <chr>               
-#1 accuracy    binary     0.985     5 0.000523 Preprocessor1_Model1
-#2 roc_auc     binary     0.994     5 0.000810 Preprocessor1_Model1
-#3 sensitivity binary     0.984     5 0.00258  Preprocessor1_Model1
-#4 specificity binary     0.985     5 0.00166  Preprocessor1_Model1
-
-#Test set performance:
-# A tibble: 3 × 3
-#  .metric  .estimator .estimate
-#  <chr>    <chr>          <dbl>
-#1 accuracy binary         0.991
-#2 kap      binary         0.982
-#3 roc_auc  binary         0.996
-
-# ============================================================ 
-#MODEL TRAINING COMPLETED
-#============================================================ 
-#Training samples: 7999 
-#Test samples: 2001 
-#Features used: 370 
-#Cross-validation folds: 5
+# === Model Performance Summary ===
+# The following results summarize the model's performance on both cross-validation and test sets.
+#
+# Cross-validation results (mean ± sd):
+#   - accuracy:    0.971 ± 0.00178
+#   - roc_auc:     0.982 ± 0.000965
+#   - sensitivity: 0.984 ± 0.00152
+#   - specificity: 0.955 ± 0.00302
+#
+# Test set performance:
+#   - accuracy: 0.970
+#   - kappa:    0.939
+#   - roc_auc:  0.977
+#
+# Model training details:
+#   - Training samples: 7899
+#   - Test samples:     1975
+#   - Features used:    371
+#   - Cross-validation folds: 5
 
 # save model
 saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction_model.rds")
@@ -893,9 +884,8 @@ train_predictions <- predict(sex_model_results$workflow,
 # Compute ROC curve data using training predictions
 roc_data <- roc_curve(train_predictions, truth = sex, .pred_female)
 
-# Plot ROC curve
-ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
-  geom_line(color = "blue", size = 1.2) +
+plot_roc = ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(color = "#377EB8", size = 1.2) +
   geom_abline(linetype = "dashed", color = "gray") +
   labs(
     title = "ROC Curve on Training Data",
@@ -903,6 +893,48 @@ ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
     y = "True Positive Rate (Sensitivity)"
   ) +
   theme_minimal()
+
+# Plot feature importance
+library(ggplot2)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# Extract feature importance from the model
+importance_scores <- extract_fit_engine(sex_model_results$workflow)$importance
+if (!is.null(importance_scores)) {
+  # Convert to data frame for plotting
+  importance_df <- data.frame(
+    gene = rownames(importance_scores),
+    importance = importance_scores[, "MeanDecreaseGini"]
+  ) %>%
+    arrange(desc(importance)) %>%
+    head(20)  # Top 20 genes
+
+  plot_importance <- 
+    importance_df |>
+    # Clear ensemble _X prefix using tidyverse
+    mutate(gene = str_remove(gene, "_X$")) |>
+    # add gene symbol using annotation
+    mutate(symbol = mapIds(org.Hs.eg.db,
+                          keys = gene,
+                          keytype = "ENSEMBL",
+                          column = "SYMBOL",
+                          multiVals = "first"
+    )) |>
+    ggplot(aes(x = reorder(symbol, importance), y = importance)) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      coord_flip() +
+      labs(
+        title = "Top 20 Most Important Genes for Sex Prediction",
+        x = "Gene",
+        y = "Importance (Mean Decrease Gini)"
+      ) +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 8))
+}
+
+detach("package:org.Hs.eg.db", unload = TRUE)
+detach("package:AnnotationDbi", unload = TRUE)
 
 # Save model for future use (optional)
 # saveRDS(sex_model_results, "sex_prediction_model.rds")
@@ -949,11 +981,39 @@ colData(se_unknown)$sex_prediction <- se_unknown_class_predictions$.pred_class
 # count tissue_groups and sex_prediction
 colData(se_unknown) |>
  as_tibble() |> 
- dplyr::count(tissue, tissue_groups, sex_prediction, age_days) |> 
+ dplyr::count(tissue_groups, sex_prediction, age_days) |> 
  print(n=99)
 
-# save the tissue_prediction_counts
-write.csv(tissue_prediction_counts, "~/Documents/GitHub/article_cellNexus/tissue_prediction_counts.csv", row.names = FALSE)
+# Plot bar chart of predicted sex for unknown samples across tissues
+# Use red/blue color scheme and reorder tissues within ggplot call
+library(forcats)
+
+# Plot bar chart of predicted sex for unknown samples across tissues
+plot_unknown_prediction <- 
+  colData(se_unknown) |> 
+  as_tibble() |>
+  dplyr::count(tissue_groups, sex_prediction) |>
+  arrange(desc(n)) |>
+  ggplot(aes(x = reorder(tissue_groups, n, decreasing = TRUE), y = n, fill = sex_prediction)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("female" = "#E41A1C", "male" = "#377EB8")) +
+    labs(
+      title = "Prediction of Unknown Samples Across Tissues",
+      x = "Tissue",
+      y = "Count",
+      fill = "Predicted Sex"
+    ) +
+    theme_minimal() +
+
+    # Remove internal grid lines
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    theme(legend.position = "bottom")
+
+# Use patchwork to combine the plots
+library(patchwork)
+
+plot_roc + plot_importance + plot_unknown_prediction 
 
 # save the se_unknown
 saveRDS(se_unknown, "~/Documents/GitHub/article_cellNexus/se_unknown.rds")
