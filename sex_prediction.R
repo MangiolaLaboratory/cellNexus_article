@@ -16,6 +16,7 @@ required_pkgs <- c(
   "zellkonverter",
   "scuttle",
   "edgeR",
+  "BiocParallel",
   "parallel",     # For parallel processing
   "doParallel",   # For parallel backend
   "foreach",      # For parallel loops
@@ -23,7 +24,13 @@ required_pkgs <- c(
   "future.apply",  # Future-based parallel apply
   "tidySummarizedExperiment",
   "tidyprint",
-  "stringr"
+  "stringr",
+  "purrr",
+  "singscore",
+  "ggplot2",
+  "yardstick",
+  "patchwork",
+  "rlang"
 )
 
 for (pkg in required_pkgs) {
@@ -97,15 +104,23 @@ cat("Parallel test result:", paste(unlist(test_result), collapse = ", "), "\n")
 #' This function uses pre-built Bioconductor annotation tables for much faster
 #' coordinate lookup compared to querying EnsDb databases.
 #'
-#' @param se A SummarizedExperiment object with gene symbols or Ensembl IDs as rownames
+#' @param se A `SummarizedExperiment` with gene symbols or Ensembl IDs as `rownames(se)`
 #' @param genome_version Character, genome version to use ("hg38" or "hg19", default: "hg38")
 #' @param verbose Logical, whether to print summary information (default: TRUE)
 #'
-#' @return A SummarizedExperiment object with genomic coordinates added to rowRanges
+#' @return A `SummarizedExperiment` with genomic coordinates added to `rowRanges(se)`
 #'
 #' @examples
+#' \dontrun{
 #' se <- add_chromosome_coordinates_fast(se)
 #' se <- add_chromosome_coordinates_fast(se, genome_version = "hg19")
+#' }
+#'
+#' @importFrom GenomicFeatures genes
+#' @importFrom GenomicRanges GRanges seqnames ranges strand
+#' @importFrom IRanges IRanges
+#' @importFrom AnnotationDbi mapIds
+#' @importFrom SummarizedExperiment rowRanges rowRanges<- 
 add_chromosome_coordinates_fast <- function(se, genome_version = "hg38", verbose = TRUE) {
   
   # Validate input
@@ -268,76 +283,274 @@ add_chromosome_coordinates_fast <- function(se, genome_version = "hg38", verbose
   return(se)
 }
 
-# Read SE file
-cat("Reading H5AD file...\n")
-se <- zellkonverter::readH5AD("~/Downloads/pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE )
+#' Create tissue-specific validation sets for sex prediction
+#'
+#' This function splits a SummarizedExperiment object into tissue-specific validation sets
+#' based on sex and tissue type. It filters out samples with ambiguous or missing sex labels,
+#' removes embryonic/fetal samples (unless age_days is missing and not in fetal/placental tissues),
+#' and categorizes tissues as male-specific, female-specific, or other.
+#'
+#' @param se A SummarizedExperiment object containing sample metadata.
+#' @param sex_column The name of the column in colData(se) indicating sex (default: "sex").
+#' @param tissue_column The name of the column in colData(se) indicating tissue type (default: "tissue_groups").
+#' @param male_tissues Character vector of tissue names considered male-specific (default: c("prostate")).
+#' @param female_tissues Character vector of tissue names considered female-specific (default: c("breast", "female reproductive system", "ovary")).
+#' @param train_prop Proportion of data to use for training (default: 0.8).
+#' @param seed Random seed for reproducibility (default: 123).
+#'
+#' @return A list containing data frames for male-specific and female-specific validation sets,
+#'         as well as the filtered metadata with tissue categories.
+#' @importFrom SummarizedExperiment colData
+#' @importFrom dplyr filter case_when %>% arrange group_by summarise
+#' @importFrom tibble as_tibble
+#' @importFrom stats setNames
+#' @importFrom methods as
+#' @export
+create_tissue_validation_split <- function(se, 
+                                          sex_column = "sex",
+                                          tissue_column = "tissue_groups",
+                                          male_tissues = c("prostate"),
+                                          female_tissues = c("breast", "female reproductive system", "ovary"),
+                                          train_prop = 0.8,
+                                          seed = 123) {
+  set.seed(seed)
 
-# Add chromosome coordinates using the FAST function with pre-built tables
-cat("Adding chromosome coordinates...\n")
-se <- add_chromosome_coordinates_fast(se, genome_version = "hg38")
+  metadata <- colData(se) %>% as.data.frame()
 
-# Alternative: Use the original EnsDb function (slower but more flexible)
-# se <- add_chromosome_coordinates(se)
+  if (!sex_column %in% colnames(metadata)) {
+    stop(paste("Sex column", sex_column, "not found in metadata"))
+  }
+  if (!tissue_column %in% colnames(metadata)) {
+    stop(paste("Tissue column", tissue_column, "not found in metadata"))
+  }
 
-# This operation takes to much memory we need to do this in chunks
-# use map and print progress based on the chunk size
-# Split column wise into chunks of 1000
-cols <- colnames(se)
-col_chunks <- split(cols, ceiling(seq_along(cols)/1000))
+  valid_sex_labels <- c("female", "male", "Female", "Male", "F", "M", "f", "m")
+  metadata <- metadata %>%
+    filter(!is.na(!!sym(sex_column)) & 
+             as.character(!!sym(sex_column)) %in% valid_sex_labels &
+             as.character(!!sym(sex_column)) != "unknown")
 
-cat("Processing", length(col_chunks), "chunks for pseudobulk aggregation...\n")
+  metadata <- metadata %>%
+    filter((!is.na(age_days) & age_days >= 365) |
+             (is.na(age_days) & 
+                !grepl("fetal|embryo|placenta|cord blood", tolower(title), ignore.case = TRUE)))
 
-# Map over the chunks with progress tracking
-res <- map(col_chunks, function(chunk) {
-  se_chunk <- se[,chunk]
-  se_chunk <- scuttle::aggregateAcrossCells(  
-    se_chunk,
-    ids = colData(se_chunk)$sample_id,
-    store.number = TRUE,
-    BPPARAM = BiocParallel::MulticoreParam(workers = parallel::detectCores())
+  cat("Samples after filtering embryonic/fetal (age_days >= 365):", nrow(metadata), "\n")
+  cat("Samples with missing age_days (kept):", sum(is.na(metadata$age_days)), "\n")
+
+  metadata[[sex_column]] <- tolower(as.character(metadata[[sex_column]]))
+  metadata[[sex_column]] <- case_when(
+    metadata[[sex_column]] %in% c("female", "f") ~ "female",
+    metadata[[sex_column]] %in% c("male", "m") ~ "male",
+    TRUE ~ NA_character_
   )
-  se_chunk
-})
+  metadata <- metadata %>% filter(!is.na(!!sym(sex_column)))
 
-cat("Combining chunks...\n")
-se <- do.call(cbind, res)
+  metadata$tissue_category <- case_when(
+    metadata[[tissue_column]] %in% male_tissues ~ "male_specific",
+    metadata[[tissue_column]] %in% female_tissues ~ "female_specific",
+    TRUE ~ "other"
+  )
 
-se |> saveRDS("~/Documents/GitHub/article_cellNexus/pseudobulk_se_X_Y_subset_sample_id.rds")
+  cat("=== Tissue Distribution ===\n")
+  tissue_dist <- table(metadata[[tissue_column]], metadata[[sex_column]])
+  print(tissue_dist)
 
-se = readRDS("~/Documents/GitHub/article_cellNexus/pseudobulk_se_X_Y_subset_sample_id.rds")
+  cat("\n=== Tissue Categories ===\n")
+  cat_dist <- table(metadata$tissue_category, metadata[[sex_column]])
+  print(cat_dist)
 
-# rm(res)
+  male_validation <- metadata %>%
+    filter(!!sym(sex_column) == "male" & tissue_category == "male_specific")
+  female_validation <- metadata %>%
+    filter(!!sym(sex_column) == "female" & tissue_category == "female_specific")
+  training_samples <- metadata %>%
+    filter(tissue_category == "other")
 
-# Filter out samples with 0 total counts
-cat("Filtering samples with zero counts...\n")
-se <- se[, colSums(assay(se, "counts")) > 0]
+  if (nrow(male_validation) == 0) {
+    warning("No male-specific tissue samples found. Using random male samples for validation.")
+    male_samples <- metadata %>% filter(!!sym(sex_column) == "male")
+    if (nrow(male_samples) > 0) {
+      male_validation <- male_samples %>% slice_sample(n = min(50, nrow(male_samples)))
+      training_samples <- metadata %>% filter(!sample_id %in% male_validation$sample_id)
+    }
+  }
+  if (nrow(female_validation) == 0) {
+    warning("No female-specific tissue samples found. Using random female samples for validation.")
+    female_samples <- metadata %>% filter(!!sym(sex_column) == "female")
+    if (nrow(female_samples) > 0) {
+      female_validation <- female_samples %>% slice_sample(n = min(50, nrow(female_samples)))
+      training_samples <- metadata %>% filter(!sample_id %in% female_validation$sample_id)
+    }
+  }
 
-# Optional convenience assay: logCPM
-cat("Calculating logCPM values...\n")
-assay(se, "logCPM") <- edgeR::cpm(assay(se, "counts"), log = TRUE, prior.count = 1)
+  validation_samples <- bind_rows(male_validation, female_validation)
 
+  cat("\n=== Sample Split ===\n")
+  cat("Training samples:", nrow(training_samples), "\n")
+  cat("Validation samples:", nrow(validation_samples), "\n")
+  cat("  - Male-specific tissue validation:", nrow(male_validation), "\n")
+  cat("  - Female-specific tissue validation:", nrow(female_validation), "\n")
 
-# Calculate rank matrix using singscore from bioconductor
-library(singscore)
-cat("Calculating gene ranks using singscore...\n")
-assay(se, "singscore") <- assay(se, "logCPM") |> singscore::rankGenes()
+  train_ids <- training_samples$sample_id
+  validation_ids <- validation_samples$sample_id
 
+  return(list(
+    train_ids = train_ids,
+    validation_ids = validation_ids,
+    training_metadata = training_samples,
+    validation_metadata = validation_samples
+  ))
+}
 
-# Filter just the sex chromosomes
-cat("Filtering to sex chromosomes only...\n")
-se <- se[seqnames(rowRanges(se)) %in% c("chrX", "chrY"), ]
-cat("Retained", nrow(se), "sex chromosome genes\n")
+#' Preprocess a SummarizedExperiment for sex prediction and create splits
+#'
+#' Performs coordinate annotation, pseudobulk aggregation in chunks, logCPM
+#' calculation, singscore ranking, sex-chromosome filtering, and produces
+#' training, test, and validation `SummarizedExperiment` objects.
+#'
+#' @param se A `SummarizedExperiment` (cells/samples as columns)
+#' @param genome_version Genome version for coordinate mapping (default: "hg38")
+#' @param my_assay Name of assay to generate/use for modeling (default: "singscore")
+#' @param chunk_size Integer chunk size for pseudobulk aggregation (default: 1000)
+#' @param sex_column Column name in `colData(se)` with sex labels (default: "sex")
+#' @param tissue_column Column name in `colData(se)` with tissue labels (default: "tissue_groups")
+#' @param train_prop Proportion of labeled data used for training (default: 0.8)
+#' @param seed Random seed (default: 123)
+#'
+#' @return A list with `se_train`, `se_test`, `se_validation`, and `se_processed`
+#'
+#' @examples
+#' \dontrun{
+#' splits <- preprocess_for_sex_prediction(se)
+#' se_train <- splits$se_train
+#' se_test  <- splits$se_test
+#' se_validation <- splits$se_validation
+#' }
+#'
+#' @importFrom scuttle aggregateAcrossCells
+#' @importFrom BiocParallel MulticoreParam
+#' @importFrom SummarizedExperiment colData assay assay<-
+#' @importFrom edgeR cpm
+#' @importFrom singscore rankGenes
+#' @importFrom GenomicRanges rowRanges seqnames
+#' @importFrom dplyr filter select mutate arrange bind_rows
+#' @importFrom rsample initial_split training testing
+#' @importFrom tibble as_tibble
+#' @importFrom purrr map
+preprocess_for_sex_prediction <- function(
+  se,
+  genome_version = "hg38",
+  my_assay = "singscore",
+  chunk_size = 1000,
+  sex_column = "sex",
+  tissue_column = "tissue_groups",
+  train_prop = 0.8,
+  seed = 123
+) {
+  set.seed(seed)
 
+  # Add chromosome coordinates
+  cat("Adding chromosome coordinates...\n")
+  se <- add_chromosome_coordinates_fast(se, genome_version = genome_version)
 
-# Load tidymodels libraries
-library(tidymodels)
-library(randomForest)
-library(vip)
-library(dplyr)
+  # Aggregate across cells in chunks to avoid high memory use
+  cat("Preparing pseudobulk in chunks of", chunk_size, "columns...\n")
+  cols <- colnames(se)
+  col_chunks <- split(cols, ceiling(seq_along(cols)/chunk_size))
+  cat("Processing", length(col_chunks), "chunks for pseudobulk aggregation...\n")
 
-# Set memory limits for parallel processing
-options(future.globals.maxSize = 2 * 1024^3)  # 2GB limit
-options(future.plan = "multisession", workers = 2)  # Reduce workers to 2
+  res <- purrr::map(col_chunks, function(chunk) {
+    se_chunk <- se[, chunk]
+    scuttle::aggregateAcrossCells(
+      se_chunk,
+      ids = colData(se_chunk)$sample_id,
+      store.number = TRUE,
+      BPPARAM = BiocParallel::MulticoreParam(workers = parallel::detectCores())
+    )
+  }, .progress = TRUE)
+
+  cat("Combining chunks...\n")
+  se_pb <- do.call(cbind, res)
+
+  # Persist intermediate (optional)
+  try({
+    saveRDS(se_pb, "~/Documents/GitHub/article_cellNexus/pseudobulk_se_X_Y_subset_sample_id.rds")
+  }, silent = TRUE)
+
+  # Filter out samples with zero counts
+  cat("Filtering samples with zero counts...\n")
+  se_pb <- se_pb[, colSums(assay(se_pb, "counts")) > 0]
+
+  # Create logCPM assay
+  cat("Calculating logCPM values...\n")
+  assay(se_pb, "logCPM") <- edgeR::cpm(assay(se_pb, "counts"), log = TRUE, prior.count = 1)
+
+  # Rank genes using singscore
+  library(singscore)
+  cat("Calculating gene ranks using singscore...\n")
+  assay(se_pb, "singscore") <- assay(se_pb, "logCPM") |> singscore::rankGenes()
+
+  # Keep sex chromosomes only
+  cat("Filtering to sex chromosomes only...\n")
+  se_pb <- se_pb[seqnames(rowRanges(se_pb)) %in% c("chrX", "chrY"), ]
+  cat("Retained", nrow(se_pb), "sex chromosome genes\n")
+
+  # Build tissue-specific validation split on full processed SE
+  cat("Creating tissue-specific validation split...\n")
+  split_info <- create_tissue_validation_split(
+    se = se_pb,
+    sex_column = sex_column,
+    tissue_column = tissue_column,
+    seed = seed
+  )
+
+  se_validation <- se_pb[, colnames(se_pb) %in% split_info$validation_ids]
+  colData(se_validation)[[sex_column]] <- droplevels(colData(se_validation)[[sex_column]])
+
+  # Labeled data for train/test (exclude unknown)
+  valid_sex_labels <- c("female", "male", "Female", "Male", "F", "M", "f", "m")
+  labeled_mask <- !is.na(colData(se_pb)[[sex_column]]) &
+    as.character(colData(se_pb)[[sex_column]]) %in% valid_sex_labels &
+    !(colnames(se_pb) %in% split_info$validation_ids)
+
+  se_labeled <- se_pb[, labeled_mask]
+
+  # Create initial train/test split based on column metadata
+  meta_labeled <- as.data.frame(colData(se_labeled))
+  meta_labeled$.__sample_id__ <- colnames(se_labeled)
+
+  rs <- rsample::initial_split(
+    meta_labeled,
+    prop = train_prop,
+    strata = !!rlang::sym(sex_column)
+  )
+  train_ids <- rsample::training(rs)$.__sample_id__
+  test_ids  <- rsample::testing(rs)$.__sample_id__
+
+  se_train <- se_labeled[, colnames(se_labeled) %in% train_ids]
+  se_test  <- se_labeled[, colnames(se_labeled) %in% test_ids]
+
+  # Optional downsampling to cap size
+  if (ncol(se_train) > 10000) {
+    cat("Training set is large, sampling 10000 samples to avoid memory issues...\n")
+    set.seed(seed)
+    sample_cols <- sample(colnames(se_train), 10000)
+    se_train <- se_train[, sample_cols]
+    cat("Sampled training SE dimensions:", dim(se_train), "\n")
+  }
+
+  cat("Training SE dimensions:", dim(se_train), "\n")
+  cat("Test SE dimensions:", dim(se_test), "\n")
+  cat("Validation SE dimensions:", dim(se_validation), "\n")
+
+  invisible(list(
+    se_train = se_train,
+    se_test = se_test,
+    se_validation = se_validation,
+    se_processed = se_pb
+  ))
+}
 
 # Build a random forest that is able to predict the sex of the samples
 # This should be robust to some simple covariates such as batch and batch effect correction and replicate
@@ -359,422 +572,445 @@ options(future.plan = "multisession", workers = 2)  # Reduce workers to 2
 #' @param seed Numeric, random seed for reproducibility (default: 123)
 #'
 #' @return A list containing the trained workflow, performance metrics, and data splits
-build_sex_prediction_model <- function(se,
-                                       my_assay = "logCPM",
-                                       sex_column = "sex",
-                                       batch_columns = c("batch", "replicate"),
-                                       train_prop = 0.8,
-                                       trees = 1000,
-                                       min_n = 5,
-                                       mtry = NULL,
-                                       seed = 123) {
+#' Train a robust sex prediction model using tidymodels/randomForest
+#'
+#' Builds a preprocessing recipe and random forest classifier on sex-chromosome
+#' features and optional batch covariates, with optional tuning of `mtry` and
+#' cross-validation. Can accept an external test set; otherwise, performs an
+#' internal split.
+#'
+#' @param se A `SummarizedExperiment` for training
+#' @param se_test Optional `SummarizedExperiment` for testing (default: NULL)
+#' @param my_assay Name of assay to use (default: "logCPM")
+#' @param sex_column Outcome column name in metadata (default: "sex")
+#' @param batch_columns Character vector of additional metadata predictors
+#' @param train_prop Train proportion if internal split is used (default: 0.8)
+#' @param trees Number of trees (default: 1000)
+#' @param min_n Minimum observations per terminal node (default: 5)
+#' @param mtry Optional mtry value; if NULL, tuned via grid (default: NULL)
+#' @param seed Random seed (default: 123)
+#'
+#' @return A list with trained `workflow`, `recipe`, metrics and predictor metadata
+#'
+#' @examples
+#' \dontrun{
+#' fit <- build_sex_prediction_model(se_train, se_test = se_test, my_assay = "singscore")
+#' }
+#'
+#' @importFrom dplyr select filter mutate
+#' @importFrom tibble as_tibble
+#' @importFrom yardstick metrics roc_auc accuracy sensitivity specificity
+#' @importFrom rsample initial_split training testing vfold_cv
+#' @importFrom recipes recipe step_impute_median step_unknown step_novel step_zv step_normalize step_corr all_numeric_predictors all_nominal_predictors all_predictors
+#' @importFrom parsnip rand_forest set_engine set_mode fit
+#' @importFrom workflows workflow add_recipe add_model
+#' @importFrom tune tune tune_grid grid_regular select_best finalize_workflow control_grid
+#' @importFrom tune fit_resamples
+#' @importFrom dplyr bind_cols
+build_sex_prediction_model <- function(se, se_test = NULL, my_assay = "singscore", sex_column = "sex", 
+                                       batch_columns = c("assay", "tissue_groups", "age_days"), 
+                                       train_prop = 0.8, trees = 500, seed = 123) {
   
   set.seed(seed)
   
-  # Extract expression data and metadata
-  expr_data <- t(assay(se, my_assay)) # transpose so samples are rows
-  metadata <- colData(se) %>% as.data.frame()
-  
-  # Combine expression and metadata
-  model_data <- cbind(metadata, expr_data) %>%
-    as_tibble()
-  
-  # Check if sex column exists
-  if (!sex_column %in% colnames(model_data)) {
-    stop(paste("Sex column", sex_column, "not found in metadata"))
-  }
-  
-  # Convert sex to factor for classification and remove unknown/NA values
-  model_data[[sex_column]] <- as.factor(model_data[[sex_column]])
-  
-  # Remove samples with unknown, NA, or ambiguous sex labels
-  valid_sex_labels <- c("female", "male", "Female", "Male", "F", "M", "f", "m")
-  model_data <- model_data %>%
-    filter(!is.na(!!sym(sex_column)) & 
-           as.character(!!sym(sex_column)) %in% valid_sex_labels)
-  
-  # Standardize sex labels to lowercase
-  model_data[[sex_column]] <- tolower(as.character(model_data[[sex_column]]))
-  model_data[[sex_column]] <- case_when(
-    model_data[[sex_column]] %in% c("female", "f") ~ "female",
-    model_data[[sex_column]] %in% c("male", "m") ~ "male",
-    TRUE ~ NA_character_
-  )
-  model_data <- model_data %>% filter(!is.na(!!sym(sex_column)))
-  model_data[[sex_column]] <- as.factor(model_data[[sex_column]])
-  
-  if (nrow(model_data) == 0) {
-    stop("No samples with valid sex labels found. Check your sex column values.")
-  }
-  
-  # Select features: sex chromosomes genes + batch covariates
-  feature_cols <- c(sex_column, 
-                    intersect(batch_columns, colnames(model_data)),
-                    colnames(expr_data))
-  
-  model_data <- model_data %>%
-    select(all_of(feature_cols)) %>%
-    # Remove any columns with all NA or zero variance (handle factors properly)
-    select(where(~ {
-      !all(is.na(.x)) && 
-      if(is.numeric(.x)) {
-        var(.x, na.rm = TRUE) > 0
-      } else if(is.factor(.x) || is.character(.x)) {
-        length(unique(.x[!is.na(.x)])) > 1  # More than one unique value
-      } else {
-        TRUE
-      }
-    }))
-  
-  cat("Using", ncol(model_data) - 1, "features for prediction\n")
-  cat("Target variable levels:", paste(levels(model_data[[sex_column]]), collapse = ", "), "\n")
-  
-  # Create data split
-  data_split <- initial_split(model_data, prop = train_prop, strata = !!sym(sex_column))
-  train_data <- training(data_split)
-  test_data <- testing(data_split)
-  
-  cat("Training samples:", nrow(train_data), "| Test samples:", nrow(test_data), "\n")
-  
-  # Check class distribution
-  class_counts <- table(train_data[[sex_column]])
-  cat("Class distribution in training:", paste(names(class_counts), "=", class_counts, collapse = ", "), "\n")
-  
-  # Check for minimum viable dataset size and class balance
-  min_class_size <- min(class_counts)
-  if (nrow(train_data) < 10) {
-    warning("Very small training dataset (", nrow(train_data), " samples). Results may be unreliable.")
-  }
-  if (min_class_size < 3) {
-    warning("Very few samples in smallest class (", min_class_size, "). Consider collecting more data.")
-  }
-  
-  # Create recipe for preprocessing
-  # This helps with batch effect robustness
-  recipe_spec <- recipe(as.formula(paste(sex_column, "~ .")), data = train_data) %>%
-    # Handle any remaining missing values first
-    step_impute_median(all_numeric_predictors()) %>%
-    # Remove zero variance predictors BEFORE normalization
-    step_zv(all_predictors()) %>%
-    # Center and scale all numeric predictors (gene expression)
-    step_normalize(all_numeric_predictors()) %>%
-    # Remove highly correlated predictors to reduce overfitting
-    step_corr(all_numeric_predictors(), threshold = 0.95)
-  
-  # Define random forest model with tuning
-  if (is.null(mtry)) {
-    rf_spec <- rand_forest(
-      trees = trees,
-      min_n = min_n,
-      mtry = tune()
-    ) %>%
-      set_engine("randomForest", 
-                 importance = TRUE,
-                 do.trace = FALSE,
-                 keep.forest = TRUE) %>%
-      set_mode("classification")
-  } else {
-    rf_spec <- rand_forest(
-      trees = trees,
-      min_n = min_n,
-      mtry = mtry
-    ) %>%
-      set_engine("randomForest", 
-                 importance = TRUE,
-                 do.trace = FALSE,
-                 keep.forest = TRUE) %>%
-      set_mode("classification")
-  }
-  
-  # Create workflow
-  rf_workflow <- workflow() %>%
-    add_recipe(recipe_spec) %>%
-    add_model(rf_spec)
-  
-  # Cross-validation for robustness assessment (adjust folds for small datasets)
-  n_folds <- min(5, min_class_size, floor(nrow(train_data) / 2))
-  if (n_folds < 2) {
-    warning("Dataset too small for cross-validation. Using simple validation.")
-    n_folds <- 2
-  }
-  
-  cv_folds <- vfold_cv(train_data, v = n_folds, strata = !!sym(sex_column))
-  cat("Using", n_folds, "fold cross-validation\n")
-  
-  # Tune hyperparameters if mtry is not specified
-  if (is.null(mtry)) {
-    cat("Tuning hyperparameters...\n")
-    
-    # Create tuning grid (adjust for small sample size)
-    max_mtry <- min(10, ncol(expr_data), floor(sqrt(ncol(expr_data))))
-    rf_grid <- grid_regular(
-      mtry(range = c(1, max_mtry)),
-      levels = min(3, max_mtry)  # Fewer levels for small datasets
-    )
-    
-    cat("Testing", nrow(rf_grid), "hyperparameter combinations with", n_folds, "fold CV...\n")
-    cat("Using future plan:", class(plan())[1], "with", nbrOfWorkers(), "workers\n")
-    cat("Using doParallel with", getDoParWorkers(), "workers\n")
-    
-    # Tune the model with parallel processing
-    rf_tune_results <- tune_grid(
-      rf_workflow,
-      resamples = cv_folds,
-      grid = rf_grid,
-      metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
-      control = control_grid(
-        verbose = FALSE,
-        allow_par = TRUE,
-        parallel_over = "everything"
-      )
-    )
-    
-    # Select best parameters
-    best_params <- select_best(rf_tune_results, metric = "roc_auc")
-    rf_workflow <- finalize_workflow(rf_workflow, best_params)
-    
-    cat("Best mtry:", best_params$mtry, "\n")
-  }
-  
-  # Fit final model
-  cat("Training final model with", trees, "trees...\n")
-  
-  # Fit the model
-  final_fit <- fit(rf_workflow, train_data)
-  
-  cat("Model training completed!\n")
-  
-  # Evaluate on test set
-  cat("Evaluating model on test set...\n")
-  test_predictions <- predict(final_fit, test_data, type = "prob") %>%
-    bind_cols(predict(final_fit, test_data)) %>%
-    bind_cols(test_data %>% select(!!sym(sex_column)))
-  
-  # Calculate performance metrics
-  test_metrics <- test_predictions %>%
-    metrics(truth = !!sym(sex_column), estimate = .pred_class) %>%
-    bind_rows(
-      test_predictions %>%
-        roc_auc(truth = !!sym(sex_column), paste0(".pred_", levels(model_data[[sex_column]])[1]))
-    )
-  
-  # Cross-validation performance for robustness assessment
-  cat("Performing cross-validation for robustness assessment...\n")
-  cv_metrics <- fit_resamples(
-    rf_workflow,
-    resamples = cv_folds,
-    metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
-    control = control_resamples(
-      verbose = FALSE,
-      allow_par = FALSE,  # Disable parallel processing to avoid memory issues
-      parallel_over = "everything"
-    )
-  ) %>%
-    collect_metrics()
-  
-  # Print results
-  cat("\n=== Model Performance ===\n")
-  cat("Cross-validation results (mean ± sd):\n")
-  print(cv_metrics)
-  
-  cat("\nTest set performance:\n")
-  print(test_metrics)
-  
-  # Print final summary
-  cat("\n", strrep("=", 60), "\n")
-  cat("MODEL TRAINING COMPLETED\n")
-  cat(strrep("=", 60), "\n")
-  cat("Training samples:", nrow(train_data), "\n")
-  cat("Test samples:", nrow(test_data), "\n")
-  cat("Features used:", ncol(model_data) - 1, "\n")
-  cat("Cross-validation folds:", n_folds, "\n")
-  
-  # Return comprehensive results
-  list(
-    workflow = final_fit,
-    recipe = recipe_spec,
-    test_metrics = test_metrics,
-    cv_metrics = cv_metrics,
-    test_predictions = test_predictions,
-    data_split = data_split,
-    feature_importance = NULL  # Will be added if model is fitted
-  )
-}
-
-# Function to create tissue-specific validation sets
-create_tissue_validation_split <- function(se, 
-                                          sex_column = "sex",
-                                          tissue_column = "tissue_groups",
-                                          male_tissues = c("prostate"),
-                                          female_tissues = c("breast", "female reproductive system", "ovary"),
-                                          train_prop = 0.8,
-                                          seed = 123) {
-  
-  set.seed(seed)
+  # Extract expression data from specified assay
+  expr_data <- t(assay(se, my_assay))
   
   # Get metadata
   metadata <- colData(se) %>% as.data.frame()
   
-  # Check if required columns exist
-  if (!sex_column %in% colnames(metadata)) {
-    stop(paste("Sex column", sex_column, "not found in metadata"))
-  }
-  if (!tissue_column %in% colnames(metadata)) {
-    stop(paste("Tissue column", tissue_column, "not found in metadata"))
+  # Filter out "unknown" sex labels and standardize to female/male
+  valid_sex <- metadata[[sex_column]] %in% c("female", "male")
+  if (sum(valid_sex) == 0) {
+    stop("No valid sex labels (female/male) found in the dataset")
   }
   
-  # Filter for valid sex labels (exclude unknown)
-  valid_sex_labels <- c("female", "male", "Female", "Male", "F", "M", "f", "m")
-  metadata <- metadata %>%
-    filter(!is.na(!!sym(sex_column)) & 
-           as.character(!!sym(sex_column)) %in% valid_sex_labels &
-           as.character(!!sym(sex_column)) != "unknown")
-  
-  # Filter out embryonic/fetal samples (age_days < 365) and samples with fetal/embryonic titles
-  metadata <- metadata %>%
-    filter(
-      # Keep samples with age_days >= 365
-      (!is.na(age_days) & age_days >= 365) |
-      # Keep samples with missing age_days but exclude fetal/embryonic titles
-      (is.na(age_days) & 
-       !grepl("fetal|embryo|placenta|cord blood", tolower(title), ignore.case = TRUE))
-    )
-  
-  cat("Samples after filtering embryonic/fetal (age_days >= 365):", nrow(metadata), "\n")
-  cat("Samples with missing age_days (kept):", sum(is.na(metadata$age_days)), "\n")
+  # Subset data to valid sex labels
+  expr_data <- expr_data[valid_sex, ]
+  metadata <- metadata[valid_sex, ]
   
   # Standardize sex labels
-  metadata[[sex_column]] <- tolower(as.character(metadata[[sex_column]]))
-  metadata[[sex_column]] <- case_when(
-    metadata[[sex_column]] %in% c("female", "f") ~ "female",
-    metadata[[sex_column]] %in% c("male", "m") ~ "male",
-    TRUE ~ NA_character_
-  )
-  metadata <- metadata %>% filter(!is.na(!!sym(sex_column)))
+  metadata[[sex_column]] <- factor(metadata[[sex_column]], levels = c("female", "male"))
   
-  # Create tissue categories
-  metadata$tissue_category <- case_when(
-    metadata[[tissue_column]] %in% male_tissues ~ "male_specific",
-    metadata[[tissue_column]] %in% female_tissues ~ "female_specific",
-    TRUE ~ "other"
-  )
+  # Combine expression data with batch columns
+  train_data <- expr_data %>%
+    as.data.frame() %>%
+    bind_cols(metadata %>% select(all_of(c(sex_column, batch_columns))))
   
-  # Print tissue distribution
-  cat("=== Tissue Distribution ===\n")
-  tissue_dist <- table(metadata[[tissue_column]], metadata[[sex_column]])
-  print(tissue_dist)
-  
-  cat("\n=== Tissue Categories ===\n")
-  cat_dist <- table(metadata$tissue_category, metadata[[sex_column]])
-  print(cat_dist)
-  
-  # Create validation sets
-  # Use male-specific tissues for male validation
-  male_validation <- metadata %>%
-    filter(!!sym(sex_column) == "male" & tissue_category == "male_specific")
-  
-  # Use female-specific tissues for female validation  
-  female_validation <- metadata %>%
-    filter(!!sym(sex_column) == "female" & tissue_category == "female_specific")
-  
-  # Use other tissues for training
-  training_samples <- metadata %>%
-    filter(tissue_category == "other")
-  
-  # Ensure we have enough samples in each set
-  if (nrow(male_validation) == 0) {
-    warning("No male-specific tissue samples found. Using random male samples for validation.")
-    male_samples <- metadata %>% filter(!!sym(sex_column) == "male")
-    if (nrow(male_samples) > 0) {
-      male_validation <- male_samples %>% slice_sample(n = min(50, nrow(male_samples)))
-      training_samples <- metadata %>% filter(!sample_id %in% male_validation$sample_id)
-    }
+  # Check for required columns
+  missing_cols <- setdiff(c(sex_column, batch_columns), colnames(train_data))
+  if (length(missing_cols) > 0) {
+    stop("The required columns ", paste(missing_cols, collapse = ", "), " are missing.")
   }
   
-  if (nrow(female_validation) == 0) {
-    warning("No female-specific tissue samples found. Using random female samples for validation.")
-    female_samples <- metadata %>% filter(!!sym(sex_column) == "female")
-    if (nrow(female_samples) > 0) {
-      female_validation <- female_samples %>% slice_sample(n = min(50, nrow(female_samples)))
-      training_samples <- metadata %>% filter(!sample_id %in% female_validation$sample_id)
-    }
+  # Remove rows with any NA values in key columns
+  complete_cases <- complete.cases(train_data %>% select(all_of(c(sex_column, batch_columns))))
+  if (sum(complete_cases) == 0) {
+    stop("No complete cases found after removing NA values")
   }
   
-  # Combine validation sets
-  validation_samples <- bind_rows(male_validation, female_validation)
+  train_data <- train_data[complete_cases, ]
   
-  cat("\n=== Sample Split ===\n")
-  cat("Training samples:", nrow(training_samples), "\n")
-  cat("Validation samples:", nrow(validation_samples), "\n")
-  cat("  - Male-specific tissue validation:", nrow(male_validation), "\n")
-  cat("  - Female-specific tissue validation:", nrow(female_validation), "\n")
+  # Check for infinite values and replace with NA
+  numeric_cols <- sapply(train_data, is.numeric)
+  for (col in names(numeric_cols)[numeric_cols]) {
+    train_data[[col]][is.infinite(train_data[[col]])] <- NA
+  }
   
-  # Create sample IDs for splitting
-  train_ids <- training_samples$sample_id
-  validation_ids <- validation_samples$sample_id
+  # Remove rows with any remaining NA values
+  complete_cases <- complete.cases(train_data)
+  if (sum(complete_cases) == 0) {
+    stop("No complete cases found after handling infinite values")
+  }
+  
+  train_data <- train_data[complete_cases, ]
+  
+  # Final check: ensure no "unknown" or NA values in sex column
+  train_data <- train_data %>%
+    filter(!is.na(!!sym(sex_column)) & !!sym(sex_column) != "unknown")
+  
+  if (nrow(train_data) == 0) {
+    stop("No data remaining after filtering out unknown/NA sex labels")
+  }
+  
+  # Convert sex to factor with only female/male levels
+  train_data[[sex_column]] <- factor(train_data[[sex_column]], levels = c("female", "male"))
+  
+  cat("Final class distribution:", paste(names(table(train_data[[sex_column]])), "=", table(train_data[[sex_column]]), collapse = ", "), "\n")
+  
+  # Identify feature columns (exclude target and batch columns)
+  feature_cols <- setdiff(colnames(train_data), c(sex_column, batch_columns))
+  
+  # Remove zero-variance features
+  feature_data <- train_data[, feature_cols, drop = FALSE]
+  zero_var_features <- sapply(feature_data, function(x) {
+    if (is.numeric(x)) {
+      var(x, na.rm = TRUE) == 0
+    } else {
+      length(unique(x)) <= 1
+    }
+  })
+  
+  if (sum(zero_var_features) > 0) {
+    cat("Removing", sum(zero_var_features), "zero-variance features\n")
+    feature_cols <- feature_cols[!zero_var_features]
+  }
+  
+  cat("Using", length(feature_cols), "features for prediction\n")
+  
+  # Create recipe
+  recipe_formula <- as.formula(paste(sex_column, "~", paste(c(feature_cols, batch_columns), collapse = " + ")))
+  
+  recipe <- recipe(recipe_formula, data = train_data) %>%
+    step_impute_median(all_numeric_predictors()) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_numeric_predictors()) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.95)
+  
+  # Create random forest model
+  rf_model <- rand_forest(
+    trees = trees,
+    mtry = tune()
+  ) %>%
+    set_engine("randomForest") %>%
+    set_mode("classification")
+  
+  # Create workflow
+  workflow <- workflow() %>%
+    add_recipe(recipe) %>%
+    add_model(rf_model)
+  
+  # Determine cross-validation strategy
+  min_class_size <- min(table(train_data[[sex_column]]))
+  n_folds <- min(5, min_class_size)  # Use fewer folds for small datasets
+  
+  if (n_folds < 2) {
+    warning("Very few samples in smallest class (", min_class_size, "). Consider collecting more data.")
+    n_folds <- 2
+  }
+  
+  if (nrow(train_data) < 20) {
+    warning("Dataset too small for cross-validation. Using simple validation.")
+    # Use simple train/test split instead
+    set.seed(seed)
+    split_indices <- sample(1:nrow(train_data), size = floor(0.8 * nrow(train_data)))
+    train_split <- train_data[split_indices, ]
+    test_split <- train_data[-split_indices, ]
+    
+    # Fit model on training data
+    fitted_workflow <- workflow %>%
+      fit(data = train_split)
+    
+    # Make predictions on test data
+    predictions <- predict(fitted_workflow, new_data = test_split, type = "prob")
+    predictions$.pred_class <- predict(fitted_workflow, new_data = test_split)$.pred_class
+    predictions$truth <- test_split[[sex_column]]
+    
+    # Calculate metrics
+    metrics <- predictions %>%
+      metrics(truth = truth, estimate = .pred_class) %>%
+      bind_rows(
+        roc_auc(predictions, truth = truth, .pred_female)
+      )
+    
+    return(list(
+      workflow = fitted_workflow,
+      metrics = metrics,
+      predictions = predictions,
+      train_data = train_split,
+      test_data = test_split
+    ))
+  }
+  
+  # Create cross-validation folds
+  cv_folds <- vfold_cv(train_data, v = n_folds, strata = sex_column)
+  
+  cat("Training samples:", nrow(train_data), "| Test samples:", ifelse(is.null(se_test), "None", ncol(se_test)), "\n")
+  cat("Class distribution in training:", paste(names(table(train_data[[sex_column]])), "=", table(train_data[[sex_column]]), collapse = ", "), "\n")
+  cat("Using", n_folds, "fold cross-validation\n")
+  
+  # Define tuning grid
+  mtry_values <- seq(1, min(20, length(feature_cols)), by = 1)
+  if (length(mtry_values) == 0) mtry_values <- 1
+  
+  tuning_grid <- grid_regular(
+    mtry(range = c(1, min(20, length(feature_cols)))),
+    levels = min(3, length(mtry_values))
+  )
+  
+  cat("Tuning hyperparameters...\n")
+  cat("Testing", nrow(tuning_grid), "hyperparameter combinations with", n_folds, "fold CV...\n")
+  
+  # Configure parallel processing safely
+  n_workers <- parallel::detectCores() - 1  # Use fewer workers to avoid conflicts
+  cat("Using", n_workers, "workers for parallel processing\n")
+  
+  # Set up parallel processing with reduced memory usage
+  plan(multisession, workers = n_workers)
+  
+  # Tune the model with controlled parallel processing
+  rf_tune_results <- workflow %>%
+    tune_grid(
+      resamples = cv_folds,
+      grid = tuning_grid,
+      metrics = metric_set(accuracy, roc_auc, sensitivity, specificity),
+      control = control_resamples(
+        allow_par = TRUE, 
+        verbose = TRUE,
+        parallel_over = "everything"  # Only parallelize over resamples, not everything
+      )
+    )
+  
+  # Check if tuning was successful
+  if (nrow(rf_tune_results) == 0 || all(is.na(rf_tune_results$.metrics))) {
+    stop("All models failed during tuning. Check data quality and try with fewer features.")
+  }
+  
+  # Select best model
+  best_model <- select_best(rf_tune_results, metric = "roc_auc")
+  
+  # Finalize workflow with best parameters
+  final_workflow <- workflow %>%
+    finalize_workflow(best_model)
+  
+  # Fit final model on full training data
+  final_fit <- final_workflow %>%
+    fit(data = train_data)
+  
+  # Make predictions on training data
+  train_predictions <- predict(final_fit, new_data = train_data, type = "prob")
+  train_predictions$.pred_class <- predict(final_fit, new_data = train_data)$.pred_class
+  train_predictions$truth <- train_data[[sex_column]]
+  
+  # Calculate training metrics
+  train_metrics <- train_predictions %>%
+    metrics(truth = truth, estimate = .pred_class) %>%
+    bind_rows(
+      roc_auc(train_predictions, truth = truth, .pred_female)
+    )
+  
+  # If test data is provided, evaluate on it
+  test_metrics <- NULL
+  test_predictions <- NULL
+  
+  if (!is.null(se_test)) {
+    # Prepare test data
+    test_expr_data <- t(assay(se_test, my_assay))
+    test_metadata <- colData(se_test) %>% as.data.frame()
+    
+    # Filter test data
+    test_valid_sex <- test_metadata[[sex_column]] %in% c("female", "male")
+    if (sum(test_valid_sex) > 0) {
+      test_expr_data <- test_expr_data[test_valid_sex, ]
+      test_metadata <- test_metadata[test_valid_sex, ]
+      test_metadata[[sex_column]] <- factor(test_metadata[[sex_column]], levels = c("female", "male"))
+      
+      test_data <- test_expr_data %>%
+        as.data.frame() %>%
+        bind_cols(test_metadata %>% select(all_of(c(sex_column, batch_columns))))
+      
+      # Apply same preprocessing as training data
+      test_complete_cases <- complete.cases(test_data %>% select(all_of(c(sex_column, batch_columns))))
+      test_data <- test_data[test_complete_cases, ]
+      
+      # Handle infinite values
+      for (col in names(numeric_cols)[numeric_cols]) {
+        if (col %in% colnames(test_data)) {
+          test_data[[col]][is.infinite(test_data[[col]])] <- NA
+        }
+      }
+      
+      test_complete_cases <- complete.cases(test_data)
+      test_data <- test_data[test_complete_cases, ]
+      
+      if (nrow(test_data) > 0) {
+        test_predictions <- predict(final_fit, new_data = test_data, type = "prob")
+        test_predictions$.pred_class <- predict(final_fit, new_data = test_data)$.pred_class
+        test_predictions$truth <- test_data[[sex_column]]
+        
+        test_metrics <- test_predictions %>%
+          metrics(truth = truth, estimate = .pred_class) %>%
+          bind_rows(
+            roc_auc(test_predictions, truth = truth, .pred_female)
+          )
+      }
+    }
+  }
   
   return(list(
-    train_ids = train_ids,
-    validation_ids = validation_ids,
-    training_metadata = training_samples,
-    validation_metadata = validation_samples
+    workflow = final_fit,
+    train_metrics = train_metrics,
+    test_metrics = test_metrics,
+    train_predictions = train_predictions,
+    test_predictions = test_predictions,
+    tune_results = rf_tune_results,
+    best_params = best_model
   ))
 }
 
-# Train the sex prediction model
-# Note: Adjust the sex_column and batch_columns parameters based on your actual metadata
-cat("\n", strrep("=", 60), "\n")
-cat("BUILDING SEX PREDICTION MODEL\n")
-cat(strrep("=", 60), "\n")
+# Predict function: add sex_predicted to colData of a SummarizedExperiment
+#' Predict sex for all samples and write result to colData(se)$sex_predicted
+#'
+#' Takes a trained model (as returned by `build_sex_prediction_model`) and a
+#' `SummarizedExperiment`, constructs the predictor matrix from metadata and the
+#' specified assay, reconciles missing predictors, and writes a `sex_predicted`
+#' column into `colData(se)`.
+#'
+#' @param se A `SummarizedExperiment` to annotate with predictions
+#' @param trained_model Object returned by `build_sex_prediction_model`
+#' @param my_assay Assay name to use for prediction (default: "singscore")
+#' @param sex_column Outcome column name (used for factor level alignment)
+#'
+#' @return The same `SummarizedExperiment` with `colData(se)$sex_predicted`
+#'
+#' @examples
+#' \dontrun{
+#' se_pred <- predict_sex_for_se(se_validation, sex_model_fitted, my_assay = "singscore")
+#' }
+#'
+#' @importFrom SummarizedExperiment colData assay
+#' @importFrom tibble as_tibble
+#' @importFrom dplyr select
+predict_sex_for_se <- function(se,
+                               trained_model,
+                               my_assay = "singscore",
+                               sex_column = "sex") {
+  stopifnot("workflow" %in% class(trained_model))
+  wf <- trained_model
 
-# Create tissue-specific validation split
-cat("Creating tissue-specific validation split...\n")
-cat("Note: Only prostate tissue available for male reproductive validation\n")
-tissue_split <- create_tissue_validation_split(
-  se = se,
+  # Build new_data from SE
+  new_data <- cbind(
+    colData(se) %>% as.data.frame(),
+    t(assay(se, my_assay))
+  ) %>% as_tibble()
+
+  # Get the feature names from the workflow's recipe
+  recipe <- extract_preprocessor(wf)
+  feature_names <- recipe$var_info$variable[recipe$var_info$role == "predictor"]
+  
+  # Ensure required predictors exist; create placeholders when missing
+  missing_cols <- setdiff(feature_names, colnames(new_data))
+  if (length(missing_cols) > 0) {
+    cat("Warning: Missing columns in prediction data:", length(missing_cols), "columns\n")
+    cat("First few missing columns:", head(missing_cols), "\n")
+    
+    # Add missing columns with NA values
+    for (col in missing_cols) {
+      new_data[[col]] <- NA_real_
+    }
+  }
+
+  # Keep only predictors used by the model
+  new_data <- new_data %>% dplyr::select(dplyr::all_of(feature_names))
+
+  # Generate class predictions
+  class_pred <- predict(wf, new_data = new_data, type = "class")
+  colData(se)$sex_predicted <- class_pred$.pred_class
+  se
+}
+
+
+# Load tidymodels libraries
+library(tidymodels)
+library(randomForest)
+library(vip)
+library(dplyr)
+
+# Set memory limits for parallel processing
+options(future.globals.maxSize = 4 * 1024^3)  # 4GB limit - more conservative
+options(future.plan = "multisession", workers = 4)  # Use 4 workers instead of 10
+
+ 
+
+## === Part 1: Preprocessing to obtain train / test / validation ===
+cat("Reading H5AD file...\n")
+se_raw <- zellkonverter::readH5AD("~/Downloads/pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE)
+
+splits <- preprocess_for_sex_prediction(
+  se = se_raw,
+  genome_version = "hg38",
+  my_assay = "singscore",
+  chunk_size = 1000,
   sex_column = "sex",
   tissue_column = "tissue_groups",
-  male_tissues = c("prostate"),  # Only male reproductive tissue available
-  female_tissues = c("breast", "female reproductive system", "ovary"),
+  train_prop = 0.8,
   seed = 123
 )
 
-# Filter SE objects for training and validation
-se_train <- se[, colnames(se) %in% tissue_split$train_ids]
-se_validation <- se[, colnames(se) %in% tissue_split$validation_ids]
+# Save the splits
+saveRDS(splits, "~/Documents/GitHub/article_cellNexus/sex_prediction_splits.rds")
 
-# Filter validation set to exclude unknown sex labels
-colData(se_validation)$sex <- colData(se_validation)$sex |> droplevels()  
+splits <- readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction_splits.rds")
 
-cat("Training SE dimensions:", dim(se_train), "\n")
-cat("Validation SE dimensions:", dim(se_validation), "\n")
+se_train <- splits$se_train
+se_test <- splits$se_test
+se_validation <- splits$se_validation
 
-# If training set is too large, sample a subset to avoid memory issues
-if (ncol(se_train) > 10000) {
-  cat("Training set is large, sampling 10000 samples to avoid memory issues...\n")
-  set.seed(123)
-  sample_cols <- sample(colnames(se_train), 10000)
-  se_train <- se_train[, sample_cols]
-  cat("Sampled training SE dimensions:", dim(se_train), "\n")
-}
 
-# Clean up memory
-gc()
-
-# Save session state
-save.image("~/Documents/GitHub/article_cellNexus/sex_prediction_session_state.RData")
-
-# Build model on training data
+## === Part 2: Train model and keep trained workflow for prediction ===
 cat("Building sex prediction model on training data...\n")
 sex_model_results <- build_sex_prediction_model(
   se = se_train,
+  se_test = se_test,
   my_assay = "singscore",
   sex_column = "sex",
-  batch_columns = c("assay", "tissue_groups", "age_days"),  # Added age_days
+  batch_columns = c("assay", "tissue_groups", "age_days"),
   train_prop = 0.8,
-  trees = 500,  # Reduced from 1000 to save memory
+  trees = 500,
   seed = 123
 )
+
+# save model
+saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction_model.rds")
+
+# Print training metrics
+cat("\n=== Training Performance ===\n")
+print(sex_model_results$train_metrics)
+
+if (!is.null(sex_model_results$test_metrics)) {
+  cat("\n=== Test Performance ===\n")
+  print(sex_model_results$test_metrics)
+}
 
 
 # === Model Performance Summary ===
@@ -797,37 +1033,32 @@ sex_model_results <- build_sex_prediction_model(
 #   - Features used:    371
 #   - Cross-validation folds: 5
 
-# save model
-saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction_model.rds")
 
-
-# Validate on tissue-specific validation set
+## === Part 3: Prediction function and validation application ===
 cat("\n=== Tissue-Specific Validation ===\n")
 cat("Validating on sex-specific tissues...\n")
 
-# Get predictions on validation set
-validation_predictions <- predict(sex_model_results$workflow, 
-                                 new_data = t(assay(se_validation, "singscore")) %>%
-                                   as.data.frame() %>%
-                                   bind_cols(colData(se_validation) %>% as.data.frame()),
-                                 type = "prob") %>%
-  bind_cols(predict(sex_model_results$workflow, 
-                   new_data = t(assay(se_validation, "singscore")) %>%
-                     as.data.frame() %>%
-                     bind_cols(colData(se_validation) %>% as.data.frame()))) %>%
-  bind_cols(colData(se_validation) %>% as.data.frame() %>% select(sex, tissue_groups))
+# Add sex_predicted to validation SE using the helper function
+se_validation_pred <- predict_sex_for_se(
+  se = se_validation,
+  trained_model = sex_model_results$workflow,
+  my_assay = "singscore",
+  sex_column = "sex"
+)
+
+# Build evaluation tibble
+validation_predictions <- colData(se_validation_pred) %>%
+  as.data.frame() %>%
+  as_tibble() %>%
+  mutate(.pred_class = factor(sex_predicted, levels = levels(sex)))
 
 
 cat("Validation predictions after filtering unknown sex:", nrow(validation_predictions), "\n")
 cat("Sex levels in validation predictions:", paste(levels(validation_predictions$sex), collapse = ", "), "\n")
   
-  # Calculate validation metrics
+  # Calculate validation metrics (classification only here)
   validation_metrics <- validation_predictions %>%
-    metrics(truth = sex, estimate = .pred_class) %>%
-    bind_rows(
-      validation_predictions %>%
-        roc_auc(truth = sex, .pred_female)
-    )
+    metrics(truth = sex, estimate = .pred_class)
   
   cat("Tissue-specific validation performance:\n")
   print(validation_metrics)
@@ -863,26 +1094,14 @@ if ("randomForest" %in% class(extract_fit_engine(trained_model))) {
 cat("Top 10 most important features:\n")
 print(top_features)
 
-# Plot ROC curve on training data
-library(ggplot2)
-library(yardstick)
+# === ROC Curve and Feature Importance ===
+cat("\n=== ROC Curve and Feature Importance ===\n")
 
-# Get training predictions by applying model to training data
-# First, let's get the training data from the original SE object
-train_data <- t(assay(se_train, "singscore")) %>%
-  as.data.frame() %>%
-  bind_cols(colData(se_train) %>% as.data.frame() %>% select(sex, assay, tissue_groups, age_days))
-
-# Get predictions on training data
-train_predictions <- predict(sex_model_results$workflow, 
-                           new_data = train_data,
-                           type = "prob") %>%
-  bind_cols(sex = train_data$sex) %>%
-  # Drop unused factor levels
-  mutate(sex = droplevels(sex))
+# Use training predictions from model results
+train_predictions <- sex_model_results$train_predictions
 
 # Compute ROC curve data using training predictions
-roc_data <- roc_curve(train_predictions, truth = sex, .pred_female)
+roc_data <- roc_curve(train_predictions, truth = truth, .pred_female)
 
 plot_roc = ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity)) +
   geom_line(color = "#377EB8", size = 1.2) +
@@ -899,9 +1118,8 @@ library(ggplot2)
 library(org.Hs.eg.db)
 library(AnnotationDbi)
 
-# Extract feature importance from the model
+ # Extract feature importance from the model
 importance_scores <- extract_fit_engine(sex_model_results$workflow)$importance
-if (!is.null(importance_scores)) {
   # Convert to data frame for plotting
   importance_df <- data.frame(
     gene = rownames(importance_scores),
@@ -920,7 +1138,9 @@ if (!is.null(importance_scores)) {
                           keytype = "ENSEMBL",
                           column = "SYMBOL",
                           multiVals = "first"
-    )) |>
+    ), symbol = if_else(is.na(symbol), gene, symbol)
+    ) |>
+
     ggplot(aes(x = reorder(symbol, importance), y = importance)) +
       geom_bar(stat = "identity", fill = "steelblue") +
       coord_flip() +
@@ -930,21 +1150,31 @@ if (!is.null(importance_scores)) {
         y = "Importance (Mean Decrease Gini)"
       ) +
       theme_minimal() +
-      theme(axis.text.y = element_text(size = 8))
-}
+     theme(axis.text.y = element_text(size = 8))
+
 
 detach("package:org.Hs.eg.db", unload = TRUE)
-detach("package:AnnotationDbi", unload = TRUE)
+
+# Now predict for the unknown samples
+# remotes::install_github("MangiolaLaboratory/cellNexus", force = TRUE)
+# library(cellNexus)
+
+# get the unknown samples
+#se_unknown_samples <- 
+#get_metadata() |>
+#filter(sex == "unknown" | is.na(sex)) |>
+#get_pseudobulk()
 
 # Save model for future use (optional)
-# saveRDS(sex_model_results, "sex_prediction_model.rds")
+# saveRDS(sex_model_fitted, "sex_prediction_model.rds")
 
 cat("\n", strrep("=", 60), "\n")
 cat("ANALYSIS COMPLETED SUCCESSFULLY\n")
 cat(strrep("=", 60), "\n")
 cat("Final model saved and ready for predictions\n")
-# now select the sex == unknown and predict the sex
-se_unknown <- se[, colData(se)$sex == "unknown" | is.na(colData(se)$sex)]
+# now select the sex == unknown and predict the sex using the helper function
+se_all <- splits$se_processed
+se_unknown <- se_all[, colData(se_all)$sex == "unknown" | is.na(colData(se_all)$sex)]
 
 # Check if age_days is available in the unknown samples
 cat("Unknown samples with age_days:", sum(!is.na(colData(se_unknown)$age_days)), "\n")
@@ -960,28 +1190,19 @@ se_unknown_filtered <- se_unknown[,
 cat("Unknown samples after filtering embryonic/fetal (age_days >= 365):", ncol(se_unknown_filtered), "\n")
 cat("Samples excluded (embryonic/fetal or missing age):", ncol(se_unknown) - ncol(se_unknown_filtered), "\n")
 
-# Use the filtered dataset for predictions
-se_unknown <- se_unknown_filtered
 
-se_unknown_predictions <- predict(sex_model_results$workflow, 
-                                  new_data = t(assay(se_unknown, "singscore")) %>%
-                                    as.data.frame() %>%
-                                    bind_cols(colData(se_unknown) %>% as.data.frame()),
-                                  type = "prob")
-
-# Get class predictions (not just probabilities)
-se_unknown_class_predictions <- predict(sex_model_results$workflow, 
-                                       new_data = t(assay(se_unknown, "singscore")) %>%
-                                         as.data.frame() %>%
-                                         bind_cols(colData(se_unknown) %>% as.data.frame()))
-
-# add the predictions to the colData
-colData(se_unknown)$sex_prediction <- se_unknown_class_predictions$.pred_class
+# Add predictions directly to SE (use filtered version)
+se_unknown_filtered <- predict_sex_for_se(
+  se = se_unknown_filtered,
+  trained_model = sex_model_results$workflow,
+  my_assay = "singscore",
+  sex_column = "sex"
+)
 
 # count tissue_groups and sex_prediction
-colData(se_unknown) |>
+colData(se_unknown_filtered) |>
  as_tibble() |> 
- dplyr::count(tissue_groups, sex_prediction, age_days) |> 
+  dplyr::count(tissue_groups, sex_predicted, age_days) |> 
  print(n=99)
 
 # Plot bar chart of predicted sex for unknown samples across tissues
@@ -990,11 +1211,11 @@ library(forcats)
 
 # Plot bar chart of predicted sex for unknown samples across tissues
 plot_unknown_prediction <- 
-  colData(se_unknown) |> 
+  colData(se_unknown_filtered) |> 
   as_tibble() |>
-  dplyr::count(tissue_groups, sex_prediction) |>
+  dplyr::count(tissue_groups, sex_predicted) |>
   arrange(desc(n)) |>
-  ggplot(aes(x = reorder(tissue_groups, n, decreasing = TRUE), y = n, fill = sex_prediction)) +
+  ggplot(aes(x = reorder(tissue_groups, n, decreasing = TRUE), y = n, fill = sex_predicted)) +
     geom_bar(stat = "identity", position = "dodge") +
     scale_fill_manual(values = c("female" = "#E41A1C", "male" = "#377EB8")) +
     labs(
@@ -1004,17 +1225,30 @@ plot_unknown_prediction <-
       fill = "Predicted Sex"
     ) +
     theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-    # Remove internal grid lines
-    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    theme(legend.position = "bottom")
+  # save the unknown counts data
+  colData(se_unknown_filtered) |> 
+    as.data.frame() |>
+    as_tibble() |>
+    count(tissue_groups, sex_predicted) |>
+    arrange(desc(n)) |>
+    write.csv("~/Documents/GitHub/article_cellNexus/unknown_prediction_counts.csv", row.names = FALSE)
+} else {
+  cat("Warning: sex_predicted column not found in se_unknown_filtered. Skipping unknown prediction plot.\n")
+  plot_unknown_prediction <- NULL
+}
 
 # Use patchwork to combine the plots
 library(patchwork)
 
-plot_roc + plot_importance + plot_unknown_prediction 
+p = plot_roc + plot_importance + plot_unknown_prediction 
 
-# save the se_unknown
-saveRDS(se_unknown, "~/Documents/GitHub/article_cellNexus/se_unknown.rds")
+# legend grouped to bottom
+p = p + plot_layout(guides = "collect")
 
+ggsave(
+  "~/Documents/GitHub/article_cellNexus/sex_prediction_plots.pdf", 
+  p, units = "mm", 
+  width = 90, height = 45, scale = 3
+)
