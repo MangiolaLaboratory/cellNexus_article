@@ -1,0 +1,491 @@
+---
+title: 'Data driven consensus mapping for the immune atlas'
+date: 30 Oct 2024
+title-block-banner: true
+author: 
+  - name: Dharmesh D. Bhuva
+    orcid: 0000-0002-6398-9157
+    url: https://bhuvad.github.io/
+    email: dharmesh.bhuva@adelaide.edu.au
+    affiliation:
+      - id: sgc
+        name: SAiGENCI, The University of Adelaide
+      - id: sah
+        name: South Australian Health and Medical Research Institute (SAHMRI)
+      - id: weh
+        name: Walter and Eliza Hall Institute
+  - name: Stefano Mangiola
+    orcid: 0000-0001-7474-836X
+    email: stefano.mangiola@adelaide.edu.au
+    affiliation:
+      - ref: sgc
+      - ref: weh
+format: 
+  html:
+    theme: minty
+    df-print: paged
+    code-line-numbers: true
+    embed-resources: true
+knitr:
+  opts_chunk: 
+    message: false
+    warning: false
+    echo: false
+comments:
+  hypothesis: 
+    theme: clean
+editor: source
+abstract: |
+  Power analysis
+---
+
+```{r}
+knitr::opts_knit$set(root.dir = '../../')
+```
+
+```{r}
+library(tidyverse)
+library(duckdb)
+library(arrow)
+library(patchwork)
+library(BiocParallel)
+library(igraph)
+library(CuratedAtlasQueryR)
+library(DT)
+library(tidyHeatmap)
+library(ComplexHeatmap)
+library(tidygraph)
+library(ggraph)
+library(scico)
+```
+
+# Load data
+
+```{r}
+output_parquet = "/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/data_driven_consensus.parquet"
+# output_parquet = "./data/consensus_output.parquet"
+
+# Read back
+con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+data_consensus <- tbl(con, sql(paste0("SELECT * FROM read_parquet('", output_parquet, "')")))
+```
+
+```{r}
+map_files = list.files("./data/graphs", pattern = "immune_map", full.names = TRUE)
+names(map_files) = gsub("immune_map_(.+).csv", "\\1", basename(map_files))
+tbl_maps = map_files |> 
+  lapply(read.csv) |> 
+  list_rbind(names_to = "Approach")
+adj_immune = read.csv("./data/graphs/immune_tree.csv", row.names = 1, check.names = FALSE)
+tbl_immune = adj_immune |> 
+  rownames_to_column("from") |> 
+  pivot_longer(!from, names_to = "to", values_to = "Approach") |> 
+  filter(Approach == 1) |> 
+  mutate(Approach = "Consensus")
+```
+
+Cell types mapping from each method to our consensus dictionary.
+
+```{r fig.height = 9, fig.width=10}
+edgedf = tbl_maps |> 
+  mutate(Approach = str_to_title(Approach)) |> 
+  mutate(from = paste(from, Approach))
+
+nodedf = edgedf |> 
+  rename(name = from) |> 
+  select(!to) |> 
+  rbind(
+    data.frame(
+      "name" = rownames(adj_immune),
+      "Approach" = "Consensus"
+    )
+  ) |> 
+  select(name, Approach)
+  
+graph_from_data_frame(rbind(tbl_immune, edgedf), vertices = nodedf, directed = TRUE) |> 
+  as_tbl_graph() |> 
+  activate(nodes) |> 
+  mutate(
+    Degree = centrality_degree(mode = "all"),
+    Label = if_else(Approach == "Consensus", name, "")
+  ) |> 
+  ggraph(layout = "igraph", algorithm = "nicely") +
+  geom_edge_fan(alpha = 0.2) +
+  geom_node_point(aes(fill = Approach, size = log1p(Degree)), shape = 21) +
+  geom_node_text(aes(label = Label), repel = TRUE) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_size_continuous(range = c(3, 6)) +
+  labs(fill = "Approach") +
+  theme_void()
+```
+
+```{r}
+tbl_maps |> 
+  as_tibble() |> 
+  count(Approach, to, name = "NTypes") |> 
+  rename(CellType = to) |> 
+  # complete(Approach, CellType, fill = list(NTypes = 0)) |> 
+  group_by(Approach) |> 
+  mutate(NTypes = NTypes / sum(NTypes)) |> 
+  ungroup() |> 
+  filter(CellType != "non immune") |> 
+  mutate(CellType = factor(CellType, rownames(adj_immune))) |> 
+  heatmap(
+    .row = Approach,
+    .column = CellType,
+    .value = NTypes,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    column_order = setdiff(rownames(adj_immune), "non immune")
+  )
+```
+
+# Explore similarity across approaches
+
+Number of cells captured in each cell type class by the different methods.
+
+```{r}
+data_consensus |>
+  rename(
+    azimuth = azimuth_predicted.celltype.l2,
+    blueprint = blueprint_first.labels.fine,
+    monaco = monaco_first.labels.fine,
+    cellxgene = cell_type
+  ) |>
+  count(azimuth, monaco, blueprint, cellxgene, name = "NCells") |>
+  pivot_longer(!NCells, names_to = "Approach", values_to = "CellType") |>
+  left_join(tbl_maps, by = join_by(CellType == from, Approach == Approach), copy = TRUE) |>
+  as_tibble() |>
+  select(!CellType) |>
+  rename(CellType = to) |>
+  mutate(CellType = factor(CellType, rownames(adj_immune))) |>
+  group_by(Approach, CellType) |>
+  summarise(NCells = sum(NCells)) |>
+  ungroup() |>
+  complete(Approach, CellType, fill = list(NCells = 0)) |>
+  filter(!is.na(CellType)) |>
+  heatmap(
+    .row = Approach,
+    .column = CellType,
+    .value = NCells,
+    transform = log1p
+  )
+```
+
+Over/under representation of cell type calling by each method using the following approach where O and E are the observed and expected log cell counts. Negative values mean that we are observing much fewer cells of this type than expected.
+
+$$
+z=\frac{O-E}{\sqrt{E}}
+$$
+
+```{r}
+non_immune = tbl_maps |>
+  filter(to == "non immune") |>
+  pull(from)
+data_consensus |>
+  rename(
+    azimuth = azimuth_predicted.celltype.l2,
+    blueprint = blueprint_first.labels.fine,
+    monaco = monaco_first.labels.fine,
+    cellxgene = cell_type
+  ) |>
+  filter(!blueprint %in% non_immune) |>
+  count(azimuth, monaco, blueprint, cellxgene, name = "NCells") |>
+  as_tibble() |>
+  mutate(id = 1:length(NCells)) |>
+  pivot_longer(!c(NCells, id), names_to = "Approach", values_to = "CellType") |>
+  left_join(tbl_maps, by = join_by(CellType == from, Approach == Approach), copy = TRUE) |>
+  group_by(Approach, to) |>
+  summarise(NCells = sum(NCells)) |>
+  ungroup() |>
+  rename(CellType = to) |>
+  filter(!is.na(CellType)) |>
+  complete(Approach, CellType, fill = list(NCells = 0)) |>
+  mutate(CellType = factor(CellType, rownames(adj_immune))) |>
+  group_by(CellType) |>
+  mutate(NCells_CT = NCells / sum(NCells)) |>
+  group_by(Approach) |>
+  mutate(NCells_AP = NCells / sum(NCells)) |>
+  ungroup() |>
+  mutate(
+    NCells_Exp = NCells_CT * NCells_AP * sum(NCells),
+    z = (log1p(NCells) - log1p(NCells_Exp)) / sqrt(log1p(NCells_Exp)),
+    z = if_else(is.nan(z), 0, z),
+    Label = if_else(NCells > 0, "", "-")
+  ) |>
+  heatmap(
+    .row = Approach,
+    .column = CellType,
+    .value = z,
+    palette_value = circlize::colorRamp2(seq(-1, 1, length.out = 7), RColorBrewer::brewer.pal(7, "PRGn"))
+  ) |>
+  layer_text(.value = Label)
+```
+
+```{r}
+# data_consensus |>
+#   rename(
+#     azimuth = azimuth_predicted.celltype.l2,
+#     blueprint = blueprint_first.labels.fine,
+#     monaco = monaco_first.labels.fine
+#   ) |> 
+#   count(azimuth, monaco, blueprint) |> 
+#   as_tibble() |> 
+#   mutate(id = 1:length(n)) |> 
+#   pivot_longer(!c(n, id), names_to = "type", values_to = "CellType") |> 
+#   left_join(tbl_maps, by = join_by(CellType == from, type == type), copy = TRUE) |> 
+#   pivot_wider(id_cols = c(id, n), names_from = type, values_from = to) |> 
+#   select(!id) |> 
+#   group_by(azimuth, blueprint, monaco) |> 
+#   summarise(n = sum(n)) |> 
+#   arrange(desc(n))
+```
+
+# Map annotations
+
+```{r}
+# uses parent-to-child vote propagation and a graph-based lowest common ancestor algorithm
+consensus_annotation_conservative <- function(ig, celltype_matrix, method_weights = NULL, override_celltype = c()) {
+  stopifnot(is(ig, "igraph"))
+  stopifnot(igraph::is_directed(ig))
+  stopifnot(is.matrix(celltype_matrix) | is.data.frame(celltype_matrix))
+  
+  node_names = igraph::V(ig)$name
+
+  # check override_celltype nodes are present
+  missing_nodes = setdiff(override_celltype, node_names)
+  if (!is.null(missing_nodes) & length(missing_nodes) > 0) {
+    missing_nodes = paste(missing_nodes, collapse = ", ")
+    stop(sprintf("the following nodes in 'override_celltype' not found in 'ig': %s", utils::capture.output(utils::str(missing_nodes))))
+  }
+
+  # check celltype_matrix
+  if (ncol(celltype_matrix) == 1) {
+    # no consensus required
+    return(celltype_matrix)
+  } else {
+    celltype_matrix = as.matrix(celltype_matrix)
+    invalid_types = setdiff(celltype_matrix, c(node_names, NA))
+    if (length(invalid_types) > 0) {
+      warning(sprintf("the following cell types in 'celltype_matrix' are not in the graph and will be set to NA:\n"), utils::capture.output(utils::str(invalid_types)))
+    }
+    celltype_matrix[celltype_matrix %in% invalid_types] = NA
+  }
+
+  # check method_weights
+  if (is.null(method_weights)) {
+    method_weights = matrix(1, ncol = ncol(celltype_matrix), nrow = nrow(celltype_matrix))
+  } else if (is.vector(method_weights)) {
+    if (ncol(celltype_matrix) != length(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' should match the length of 'method_weights'")
+    }
+    method_weights = matrix(method_weights, nrow = nrow(celltype_matrix))
+  } else if (is.matrix(method_weights) | is.data.frame(method_weights)) {
+    if (ncol(celltype_matrix) != ncol(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' and 'method_weights' should be equal")
+    }
+    method_weights = as.matrix(method_weights)
+  }
+
+  # create vote matrix
+  vote_matrix = Matrix::sparseMatrix(i = integer(0), j = integer(0), dims = c(nrow(celltype_matrix), length(node_names)), dimnames = list(rownames(celltype_matrix), node_names))
+  for (i in seq_len(ncol(celltype_matrix))) {
+    locmat = cbind(seq_len(nrow(celltype_matrix)), as.numeric(factor(celltype_matrix[, i], levels = node_names)))
+    missing = is.na(locmat[, 2])
+    vote_matrix[locmat[!missing, ]] = vote_matrix[locmat[!missing, ]] + method_weights[!missing, i]
+  }
+
+  # propagate vote to children
+  d = apply(!is.infinite(igraph::distances(ig, mode = "out")), 2, as.numeric)
+  d = as(d, "sparseMatrix")
+  vote_matrix = Matrix::tcrossprod(vote_matrix, Matrix::t(d))
+
+  # assess votes and use LCA for ties
+  paths = igraph::ego(ig, order = igraph::diameter(ig), mode = "in") |>
+    lapply(\(x) x$name) |>
+    setNames(igraph::V(ig)$name)
+  consensus = apply(vote_matrix, 1, \(x) {
+    # override condition
+    override_node = intersect(override_celltype, node_names[x > 0])
+    if (length(override_node) > 0) {
+      return(override_node[1])
+    }
+
+    # maximum votes
+    x = node_names[x == max(x)]
+    if (length(x) == 1) {
+      return(x)
+    } else {
+      common_path = Reduce(intersect, paths[x])
+      if (length(common_path) > 0) {
+        return(common_path[1])
+      } else {
+        return(NA)
+      }
+    }
+  })
+  
+  return(consensus)
+}
+```
+
+
+```{r}
+# uses parent-to-child vote propagation and a child-to-parent vote propagation algorithm to identify the lowest common ancestor with the majority of votes.
+consensus_annotation <- function(ig, celltype_matrix, method_weights = NULL, override_celltype = c()) {
+  stopifnot(is(ig, "igraph"))
+  stopifnot(igraph::is_directed(ig))
+  stopifnot(is.matrix(celltype_matrix) | is.data.frame(celltype_matrix))
+  
+  node_names = igraph::V(ig)$name
+
+  # check override_celltype nodes are present
+  missing_nodes = setdiff(override_celltype, node_names)
+  if (!is.null(missing_nodes) & length(missing_nodes) > 0) {
+    missing_nodes = paste(missing_nodes, collapse = ", ")
+    stop(sprintf("the following nodes in 'override_celltype' not found in 'ig': %s", utils::capture.output(utils::str(missing_nodes))))
+  }
+
+  # check celltype_matrix
+  if (ncol(celltype_matrix) == 1) {
+    # no consensus required
+    return(celltype_matrix)
+  } else {
+    celltype_matrix = as.matrix(celltype_matrix)
+    invalid_types = setdiff(celltype_matrix, c(node_names, NA))
+    if (length(invalid_types) > 0) {
+      warning(sprintf("the following cell types in 'celltype_matrix' are not in the graph and will be set to NA:\n"), utils::capture.output(utils::str(invalid_types)))
+    }
+    celltype_matrix[celltype_matrix %in% invalid_types] = NA
+  }
+
+  # check method_weights
+  if (is.null(method_weights)) {
+    method_weights = matrix(1, ncol = ncol(celltype_matrix), nrow = nrow(celltype_matrix))
+  } else if (is.vector(method_weights)) {
+    if (ncol(celltype_matrix) != length(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' should match the length of 'method_weights'")
+    }
+    method_weights = matrix(method_weights, nrow = nrow(celltype_matrix))
+  } else if (is.matrix(method_weights) | is.data.frame(method_weights)) {
+    if (ncol(celltype_matrix) != ncol(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' and 'method_weights' should be equal")
+    }
+    method_weights = as.matrix(method_weights)
+  }
+
+  # create vote matrix
+  vote_matrix = Matrix::sparseMatrix(i = integer(0), j = integer(0), dims = c(nrow(celltype_matrix), length(node_names)), dimnames = list(rownames(celltype_matrix), node_names))
+  for (i in seq_len(ncol(celltype_matrix))) {
+    locmat = cbind(seq_len(nrow(celltype_matrix)), as.numeric(factor(celltype_matrix[, i], levels = node_names)))
+    missing = is.na(locmat[, 2])
+    vote_matrix[locmat[!missing, ]] = vote_matrix[locmat[!missing, ]] + method_weights[!missing, i]
+  }
+
+  # propagate vote to children
+  d = apply(!is.infinite(igraph::distances(ig, mode = "out")), 2, as.numeric)
+  d = as(d, "sparseMatrix")
+  vote_matrix_children = Matrix::tcrossprod(vote_matrix, Matrix::t(d))
+
+  # propagate vote to parent
+  d = igraph::distances(ig, mode = "in")
+  d = 1 / (2 ^ d) - 0.1 # vote halved at each subsequent ancestor
+  diag(d)[igraph::degree(ig, mode = "in") > 0 & igraph::degree(ig, mode = "out") == 0] = 0
+  diag(d) = diag(d) * 0.9 # prevent leaf nodes from being selected when trying to identify upstream ancestor (works for any number in the interval (0.5, 1))
+  vote_matrix_parent = Matrix::tcrossprod(vote_matrix, Matrix::t(d))
+
+  # assess votes and identify common ancestors for ties
+  vote_matrix_children = apply(vote_matrix_children, 1, \(x) x[x > 0], simplify = FALSE)
+  vote_matrix_parent = apply(vote_matrix_parent, 1, \(x) x[x > 0], simplify = FALSE)
+  consensus = mapply(\(children, parents) {
+    # override condition
+    override_node = intersect(override_celltype, names(children))
+    if (length(override_node) > 0) {
+      return(override_node[1])
+    }
+
+    # maximum votes
+    children = names(children)[children == max(children)]
+    if (length(children) == 1) {
+      return(children)
+    } else {
+      # lowest ancestor with the maximum votes
+      parents = names(parents)[parents == max(parents)]
+      if (length(parents) == 1) {
+        return(parents)
+      } else {
+        return(NA)
+      }
+    }
+  }, vote_matrix_children, vote_matrix_parent)
+
+  return(consensus)
+}
+```
+
+Two strategies are implemented here. Given a knowledge graph, the idea is to identify the lowest leaf node possible where agreement exisits across prediction approaches. When there is disagreement, the lowest common ancestor where agreement is "highest" is selected. This is done through a vote propagation approach as follows:
+
+1. Each approach get to vote for a cell type where the vote can be weighted as follows:
+    i. Equal across approaches.
+    i. Weights based on the approach's overall confidence (high weights for well performing methods).
+    i. Weights based on the prediction confidence of each approach (high weights for confident predictions).
+    i. A cell type specific weight based on the difficulty in discerning the cell type in general (low weights for cell types that are difficult to discern).
+    i. A combination of the previous weighting strategies to incorporate the methods confidence in its cell type call, and the performance of the method in general. The calculation simply requires the cell type vector and weights vector (regardless of how it is derived).
+1. The vote for each method is overlayed on the tree, and propagated all the way down to the leaf nodes in that tree.
+1. If a unique cell type exists with the highest vote, that is the consensus.
+1. If multiple cell types tie on the highest vote, a consensus ancestor algorithm is used to identify the lowest common ancestor.
+1. If a consensus ancestor does not exist (or there are ties in the ancestor calls), the cell remains unclassified (NA).
+
+Two stratefies are used to identify the consensus ancestor:
+
+1. Using the graph structure to identify the lowest common ancestor to all cell type predictions (e.g., "t", when the methods predict "t cd8", "cd4 fh em", "tgd"). Here we call this the "conservative" approach as the ancestor has to link to all predicted nodes.
+1. Using a weighted vote-based algorithm that now propagates votes from nodes to their parents and ancestors.
+
+The vote-based consensus ancestor algorithm works as follows:
+
+1. Each predicted node shares their vote with their parent. As the vote propagates, it is halved. As such, if one of the predicted nodes is "cd4 th1 em", and it has a weight of 2, "cd4 tem" gets a vote of 1, "t cd4" gets 0.5 and "t" gets 0.25. Since the node "cd4 th1 em" it self is stricly a leaf node (has incoming edges and no outgoing), it gets a vote of 0 as it cannot be a common ancestor. When the node is not a leaf node (e.g., one of the methods calling this same cell a "t cd4"), the node can vote for it self being the ancestor, however, the vote is not cast as is but gets down-weighted slightly (0.9 in this case). This is to ensure that the common ancestor is found and we are not stuck in the prediction.
+1. If a unique cell type exists with the highest vote, that is the consensus ancestor and subsequently the consensus cell type as well.
+1. If multiple cell types tie on the highest vote, the cell remains unclassified (NA).
+
+```{r fig.height=6, fig.width=6}
+ig_immune = graph_from_adjacency_matrix(as.matrix(adj_immune), mode = "directed")
+plot(ig_immune, vertex.label.dist = 0, vertex.label.color = "#000000", vertex.color = "#FC8D62", asp = 1)
+```
+
+```{r}
+ct_dict = split(tbl_maps, tbl_maps$Approach) |>
+  lapply(\(x) setNames(x$to, x$from))
+
+data_consensus |>
+  count(
+    azimuth_predicted.celltype.l2,
+    blueprint_first.labels.fine,
+    monaco_first.labels.fine,
+    name = "NCells"
+  ) |>
+  as_tibble() |>
+  mutate(
+    azimuth = ct_dict$azimuth[azimuth_predicted.celltype.l2],
+    blueprint = ct_dict$blueprint[blueprint_first.labels.fine],
+    monaco = ct_dict$monaco[monaco_first.labels.fine],
+    data_driven_consensus_conservative = consensus_annotation_conservative(ig_immune, cbind(azimuth, blueprint, monaco), override_celltype = c("non immune", "nkt", "mast")),
+    data_driven_consensus = consensus_annotation(ig_immune, cbind(azimuth, blueprint, monaco), override_celltype = c("non immune", "nkt", "mast"))
+  ) |> 
+  filter(blueprint != "non immune") |> 
+  pivot_longer(starts_with("data_driven"), names_to = "Method", values_to = "CellType") |> 
+  group_by(CellType, Method) |> 
+  summarise(NCells = sum(NCells)) |> 
+  pivot_wider(names_from = Method, values_from = NCells) |> 
+  ggplot(aes(data_driven_consensus_conservative, data_driven_consensus)) +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = CellType)) +
+  labs(x = "Conservative", y = "Lenient") +
+  geom_abline(slope = 1, intercept = 0) +
+  vissE::bhuvad_theme()
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

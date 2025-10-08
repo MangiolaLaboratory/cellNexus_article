@@ -1,0 +1,932 @@
+---
+title: 'Consensus mapping for the immune atlas'
+date: 24 Oct 2024
+title-block-banner: true
+author: 
+  - name: Dharmesh D. Bhuva
+    orcid: 0000-0002-6398-9157
+    url: https://bhuvad.github.io/
+    email: dharmesh.bhuva@adelaide.edu.au
+    affiliation:
+      - id: sgc
+        name: SAiGENCI, The University of Adelaide
+      - id: sah
+        name: South Australian Health and Medical Research Institute (SAHMRI)
+      - id: weh
+        name: Walter and Eliza Hall Institute
+  - name: Stefano Mangiola
+    orcid: 0000-0001-7474-836X
+    email: stefano.mangiola@adelaide.edu.au
+    affiliation:
+      - ref: sgc
+      - ref: weh
+format: 
+  html:
+    theme: minty
+    df-print: paged
+    code-line-numbers: true
+    embed-resources: true
+knitr:
+  opts_chunk: 
+    message: false
+    warning: false
+    echo: false
+comments:
+  hypothesis: 
+    theme: clean
+editor: source
+abstract: |
+  Power analysis
+---
+
+```{r}
+knitr::opts_knit$set(root.dir = '../../')
+```
+
+```{r}
+library(tidyverse)
+library(duckdb)
+library(arrow)
+library(patchwork)
+library(BiocParallel)
+library(igraph)
+library(CuratedAtlasQueryR)
+library(DT)
+library(tidyHeatmap)
+library(ComplexHeatmap)
+library(tidygraph)
+library(ggraph)
+library(scico)
+library(ggalluvial)
+```
+
+```{r}
+consensus_annotation <- function(ig, celltype_matrix, method_weights = NULL, override_celltype = c()) {
+  stopifnot(is(ig, "igraph"))
+  stopifnot(igraph::is_directed(ig))
+  stopifnot(is.matrix(celltype_matrix) | is.data.frame(celltype_matrix))
+
+  node_names = igraph::V(ig)$name
+
+  # check override_celltype nodes are present
+  missing_nodes = setdiff(override_celltype, node_names)
+  if (!is.null(missing_nodes) & length(missing_nodes) > 0) {
+    missing_nodes = paste(missing_nodes, collapse = ", ")
+    stop(sprintf("the following nodes in 'override_celltype' not found in 'ig': %s", utils::capture.output(utils::str(missing_nodes))))
+  }
+
+  # check celltype_matrix
+  if (ncol(celltype_matrix) == 1) {
+    # no consensus required
+    return(celltype_matrix)
+  } else {
+    celltype_matrix = as.matrix(celltype_matrix)
+    invalid_types = setdiff(celltype_matrix, c(node_names, NA))
+    if (length(invalid_types) > 0) {
+      warning(sprintf("the following cell types in 'celltype_matrix' are not in the graph and will be set to NA:\n"), utils::capture.output(utils::str(invalid_types)))
+    }
+    celltype_matrix[celltype_matrix %in% invalid_types] = NA
+  }
+
+  # check method_weights
+  if (is.null(method_weights)) {
+    method_weights = matrix(1, ncol = ncol(celltype_matrix), nrow = nrow(celltype_matrix))
+  } else if (is.vector(method_weights)) {
+    if (ncol(celltype_matrix) != length(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' should match the length of 'method_weights'")
+    }
+    method_weights = matrix(rep(method_weights, each = nrow(celltype_matrix)), nrow = nrow(celltype_matrix))
+  } else if (is.matrix(method_weights) | is.data.frame(method_weights)) {
+    if (ncol(celltype_matrix) != ncol(method_weights)) {
+      stop("the number of columns in 'celltype_matrix' and 'method_weights' should be equal")
+    }
+    method_weights = as.matrix(method_weights)
+  }
+  method_weights = method_weights / rowSums(method_weights)
+
+  # create vote matrix
+  vote_matrix = Matrix::sparseMatrix(i = integer(0), j = integer(0), dims = c(nrow(celltype_matrix), length(node_names)), dimnames = list(rownames(celltype_matrix), node_names))
+  for (i in seq_len(ncol(celltype_matrix))) {
+    locmat = cbind(seq_len(nrow(celltype_matrix)), as.numeric(factor(celltype_matrix[, i], levels = node_names)))
+    missing = is.na(locmat[, 2])
+    vote_matrix[locmat[!missing, ]] = vote_matrix[locmat[!missing, ]] + method_weights[!missing, i]
+  }
+
+  # propagate vote to children
+  d = apply(!is.infinite(igraph::distances(ig, mode = "out")), 2, as.numeric)
+  d = as(d, "sparseMatrix")
+  vote_matrix_children = Matrix::tcrossprod(vote_matrix, Matrix::t(d))
+
+  # propagate vote to parent
+  d = igraph::distances(ig, mode = "in")
+  d = 1 / (2^d) - 0.1 # vote halved at each subsequent ancestor
+  diag(d)[igraph::degree(ig, mode = "in") > 0 & igraph::degree(ig, mode = "out") == 0] = 0
+  diag(d) = diag(d) * 0.9 # prevent leaf nodes from being selected when trying to identify upstream ancestor (works for any number in the interval (0.5, 1))
+  vote_matrix_parent = Matrix::tcrossprod(vote_matrix, Matrix::t(d))
+
+  # assess votes and identify common ancestors for ties
+  vote_matrix_children = apply(vote_matrix_children, 1, \(x) x[x > 0], simplify = FALSE)
+  vote_matrix_parent = apply(vote_matrix_parent, 1, \(x) x[x > 0], simplify = FALSE)
+  consensus = mapply(\(children, parents) {
+    # override condition
+    override_node = intersect(override_celltype, names(children))
+    if (length(override_node) > 0) {
+      return(override_node[1])
+    }
+
+    # maximum votes
+    children = names(children)[children == max(children)]
+    if (length(children) == 1) {
+      return(children)
+    } else {
+      # lowest ancestor with the maximum votes
+      parents = names(parents)[parents == max(parents)]
+      if (length(parents) == 1) {
+        return(parents)
+      } else {
+        return(NA)
+      }
+    }
+  }, vote_matrix_children, vote_matrix_parent)
+
+  return(consensus)
+}
+```
+
+```{r}
+colmap_ct = c(
+  "b" = "#ADD8E6",
+  "b memory" = "#4682B4",
+  "b naive" = "#87CEEB",
+  "plasma" = "#00BFFF",
+  "ilc" = "#90EE90",
+  "nkt" = "#3CB371",
+  "nk" = "#006400",
+  "t" = "#F08080",
+  "t cd4" = "#FA8072",
+  "cd4 naive" = "#FFA07A",
+  "cd4 tcm" = "#FF7F50",
+  "cd4 tem" = "#FF6347",
+  "cd4 fh em" = "#FF4500",
+  "cd4 th1/th17 em" = "#FF8C00",
+  "cd4 th1 em" = "#FFA500",
+  "cd4 th2 em" = "#FFD700",
+  "cd4 th17 em" = "#FFFF00",
+  "t cd8" = "#FFB6C1",
+  "cd8 naive" = "#FF69B4",
+  "cd8 tcm" = "#FF1493",
+  "cd8 tem" = "#DB7093",
+  "tgd" = "#C71585",
+  "treg" = "#DA70D6",
+  "mait" = "#D8BFD8",
+  "cytotoxic" = "#DDA0DD",
+  "monocytic" = "#8B4513",
+  "cd14 mono" = "#A0522D",
+  "cd16 mono" = "#CD853F",
+  "macrophage" = "#D2B48C",
+  "dc" = "#8686c6",
+  "cdc" = "#9370DB",
+  "pdc" = "#9932CC",
+  "mast" = "#696969",
+  "progenitor" = "#808080",
+  "erythrocyte" = "#2F4F4F",
+  "granulocyte" = "#708090"
+)
+```
+
+# Load data
+
+```{r}
+output_parquet = "/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/cell_annotation.parquet"
+
+# load non immune harmonisation
+non_immune = read.csv("/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/cell_type_harmonisation_non_immune.csv")
+
+# Read back
+con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+data_consensus <- tbl(con, sql(paste0("SELECT * FROM read_parquet('", output_parquet, "')")))
+data_consensus
+```
+
+# Compute data-driven consensus
+
+```{r}
+# load knowledge graph
+adj_immune = read.csv("./data/graphs/immune_tree.csv", row.names = 1, check.names = FALSE) |> 
+  as.matrix()
+cell_order = setdiff(rownames(adj_immune), "non immune")
+ig_immune = graph_from_adjacency_matrix(adj_immune, mode = "directed")
+
+# load mappings between predictions and our dictionary
+map_files = list.files("./data/graphs", pattern = "immune_map", full.names = TRUE)
+names(map_files) = gsub("immune_map_(.+).csv", "\\1", basename(map_files))
+tbl_maps = map_files |> 
+  lapply(read.csv)
+```
+
+```{r}
+# harmonise to a common nomenclature
+map_azimuth = tbl_maps$azimuth |> 
+  select(from, to) |> 
+  dplyr::rename(
+    azimuth_predicted_celltype_l2 = from,
+    azimuth = to
+  )
+map_blueprint = tbl_maps$blueprint |> 
+  select(from, to) |> 
+  dplyr::rename(
+    blueprint_first_labels_fine = from,
+    blueprint = to
+  )
+map_monaco = tbl_maps$monaco |> 
+  select(from, to) |> 
+  dplyr::rename(
+    monaco_first_labels_fine = from,
+    monaco = to
+  )
+map_cellxgene = tbl_maps$cellxgene |> 
+  select(from, to) |> 
+  dplyr::rename(
+    cell_type = from,
+    cell_type_unified = to
+  )
+nonimmune = tbl_maps$cellxgene |> 
+  filter(!is_immune) |>
+  pull("to") |>
+  unique()
+
+data_consensus = data_consensus |>
+  left_join(map_azimuth, copy = TRUE) |>
+  left_join(map_blueprint, copy = TRUE) |>
+  left_join(map_monaco, copy = TRUE) |>
+  left_join(map_cellxgene, copy = TRUE) |> 
+  mutate(consensus_joinid = paste(azimuth, blueprint, monaco, cell_type_unified, sep = "_"))
+```
+
+```{r}
+df_map = data_consensus |> 
+  count(consensus_joinid, azimuth, blueprint, monaco, cell_type_unified, name = "NCells") |> 
+  as_tibble() |> 
+  mutate(
+    cellxgene = if_else(cell_type_unified %in% nonimmune, "non immune", cell_type_unified),
+    data_driven_consensus = consensus_annotation(ig_immune, cbind(azimuth, blueprint, monaco), override_celltype = c("non immune", "nkt", "mast")),
+    cell_type_unified_ensemble = consensus_annotation(ig_immune, cbind(azimuth, blueprint, monaco, cellxgene), method_weights = c(1, 1, 1, 2), override_celltype = c("non immune", "nkt", "mast")),
+    cell_type_unified_ensemble = case_when(
+      cell_type_unified_ensemble == "non immune" & cellxgene == "non immune" ~ cell_type_unified,
+      cell_type_unified_ensemble == "non immune" & cellxgene != "non immune" ~ "other",
+      .default = cell_type_unified_ensemble
+    ),
+    is_immune = !cell_type_unified_ensemble %in% nonimmune
+  ) |> 
+  select(!cellxgene)
+```
+
+```{r}
+df_map |>
+  pivot_longer(c(data_driven_consensus, cell_type_unified_ensemble), names_to = "Approach", values_to = "CellType") |>
+  group_by(Approach, CellType) |>
+  reframe(NCells = sum(NCells) / 1e3) |>
+  pivot_wider(names_from = "Approach", values_from = "NCells") |>
+  drop_na() |>
+  ggplot(aes(data_driven_consensus, cell_type_unified_ensemble)) +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = CellType)) +
+  geom_abline(slope = 1, intercept = 0, lty = 2, col = 2) +
+  labs(x = "Data driven ensemble", y = "Overall ensemble") +
+  vissE::bhuvad_theme()
+```
+
+```{r fig.height=9, fig.width=6}
+df_map |>
+  filter(is_immune) |>
+  group_by(cell_type_unified, cell_type_unified_ensemble) |>
+  reframe(NCells = sum(NCells)) |>
+  mutate(id = seq_len(length(NCells))) |>
+  pivot_longer(starts_with("cell_type_"), names_to = "Approach", values_to = "CellType") |>
+  mutate(
+    Approach = if_else(grepl("ensemble", Approach), "Ensemble", "Unified"),
+    Approach = factor(Approach, levels = c("Unified", "Ensemble")),
+    CellType = factor(CellType, cell_order),
+    subject = 1
+  ) |>
+  ggplot(
+    aes(
+      x = Approach, stratum = CellType, alluvium = id,
+      y = NCells,
+      fill = CellType, label = CellType
+    )
+  ) +
+  scale_x_discrete(expand = c(.1, .1)) +
+  geom_flow() +
+  geom_stratum(alpha = .5) +
+  geom_text(stat = "stratum", size = 3) +
+  scale_fill_manual(values = colmap_ct) +
+  theme(legend.position = "none") +
+  ggtitle("Annotation change upon ensemble") +
+  theme_void() +
+  theme(
+    axis.text.x = element_text()
+  )
+```
+
+```{r}
+data_consensus = data_consensus |>
+  left_join(df_map |> 
+    select(
+      consensus_joinid,
+      data_driven_consensus,
+      cell_type_unified_ensemble,
+      is_immune
+    ),
+    by = join_by(consensus_joinid),
+    copy = TRUE
+  )
+```
+
+```{r}
+data_consensus |>
+  filter(grepl("macrophage", blueprint)) |>
+  add_count(cell_type_unified_ensemble, name = "NCells") |>
+  mutate(cell_type_unified_ensemble = if_else(NCells < 1e4, "other", cell_type_unified_ensemble)) |>
+  ggplot(aes(scores.Macrophages, scores.Macrophages.M2 - scores.Macrophages.M1, colour = cell_type_unified_ensemble)) +
+  scattermore::geom_scattermore(alpha = 0.5) +
+  scale_colour_brewer(palette = "Paired", guide = guide_legend(override.aes = list(shape = 15, size = 5, alpha = 1))) +
+  geom_hline(yintercept = 0) +
+  labs(x = "Mean macrophage score", y = "M2 score - M1 score", colour = "Ensemble") +
+  vissE::bhuvad_theme()
+
+data_consensus |>
+  filter(grepl("cd4 [t|f]h.*em", monaco) & blueprint != "non immune") |>
+  add_count(cell_type_unified_ensemble, name = "NCells") |>
+  mutate(cell_type_unified_ensemble = if_else(NCells < 2e4, "other", cell_type_unified_ensemble)) |>
+  pivot_longer(matches(c("scores.Th", "scores.Follicular")), names_to = "Type", values_to = "Score") |>
+  group_by(cell_) |>
+  mutate(
+    MeanScore = mean(Score, na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  mutate(
+    DifferenceScore = Score - MeanScore,
+    Type = case_when(
+      Type == "scores.Follicular.helper.T.cells" ~ "cd4 fh em",
+      Type == "scores.Th1.cells" ~ "cd4 th1 em",
+      Type == "scores.Th1.Th17.cells" ~ "cd4 th1/th17 em",
+      Type == "scores.Th17.cells" ~ "cd4 th17 em",
+      Type == "scores.Th2.cells" ~ "cd4 th2 em",
+      .default = NA
+    )
+  ) |>
+  ggplot(aes(MeanScore, DifferenceScore, colour = cell_type_unified_ensemble)) +
+  scattermore::geom_scattermore(alpha = 0.5) +
+  scale_colour_brewer(palette = "Paired", guide = guide_legend(override.aes = list(shape = 15, size = 5, alpha = 1))) +
+  facet_wrap(~Type) +
+  geom_hline(yintercept = 0) +
+  labs(x = "Mean score", y = "Difference", colour = "Ensemble") +
+  vissE::bhuvad_theme()
+```
+
+```{r}
+immune_adj = read.csv("./data/graphs/immune_tree.csv", check.names = FALSE, row.names = 1)
+cell_order = setdiff(colnames(immune_adj), "non immune")
+
+# read immune tree
+missing_nodes = data_consensus |> 
+  distinct(cell_type_unified_ensemble) |> 
+  pull() |> 
+  setdiff(x = cell_order)
+immune_tree_edges = immune_adj |>
+  rownames_to_column("from") |>
+  pivot_longer(!from, names_to = "to", values_to = "Marked") |>
+  filter(Marked == 1) |>
+  select(!Marked) |>
+  as.data.frame() |>
+  mutate(Type = "ImmuneTree")
+immune_tree_nodes = data_consensus |>
+  filter(is_immune) |>
+  count(cell_type_unified_ensemble, dataset_id, name = "NCells") |>
+  group_by(cell_type_unified_ensemble) |>
+  summarise(NCells = sum(NCells), NDatasets = n()) |>
+  as_tibble() |>
+  dplyr::rename(name = cell_type_unified_ensemble) |>
+  mutate(Type = "ImmuneTree")
+
+if (length(missing_nodes) > 0) {
+  immune_tree_nodes |> 
+  rbind(data.frame(
+    name = missing_nodes,
+    Type = "ImmuneTree",
+    NCells = 0,
+    NDatasets = 0
+  ))
+}
+
+immune_tree = graph_from_data_frame(immune_tree_edges, vertices = immune_tree_nodes, directed = TRUE)
+```
+
+```{r}
+immune_tree |> 
+  as_tbl_graph() |> 
+  activate(nodes) |> 
+  filter(!name %in% nonimmune) |> 
+  mutate(Label = name) |> 
+  ggraph(layout = "igraph", algorithm = "nicely") +
+  geom_edge_fan() +
+  geom_node_point(aes(size = NCells / 1e6), fill = "#FC8D62", shape = 21) +
+  geom_node_text(aes(label = Label), repel = TRUE) +
+  labs(size = "NCells\n(Millions)") +
+  theme_void()
+```
+
+# Cell types mapped
+
+```{r}
+immune_tree = graph_from_adjacency_matrix(as.matrix(immune_adj))
+d = distances(immune_tree, mode = "in")
+d[is.infinite(d)] = NA
+lvl_map = setNames(paste0("L", apply(d, 1, max, na.rm = TRUE)), colnames(d))
+```
+
+```{r, include=FALSE}
+# # Init Step to make sure that the dependencies are loaded
+# htmltools::tagList(datatable(mtcars))
+```
+
+```{r fig.height=9, fig.width=10}
+data_consensus |>
+  filter(is_immune, !is.na(data_driven_consensus)) |>
+  group_by(cell_type_unified, data_driven_consensus, dataset_id) |>
+  summarise(NCells = n()) |>
+  group_by(cell_type_unified, data_driven_consensus) |>
+  summarise(NCells = sum(NCells), NDatasets = n()) |>
+  as_tibble() |>
+  mutate(
+    cell_type_unified = factor(cell_type_unified, cell_order),
+    data_driven_consensus = factor(data_driven_consensus, cell_order),
+    CellLabel = ifelse(NDatasets >= 3, NDatasets, "")
+  ) |>
+  drop_na() |>
+  heatmap(
+    .row = data_driven_consensus,
+    .column = cell_type_unified,
+    .value = NCells,
+    transform = log1p,
+    name = "log(NCells)",
+    row_title = "Data driven ensemble",
+    column_title = "Unified",
+    cluster_rows = FALSE,
+    cluster_columns = FALSE
+  ) |>
+  layer_text(.value = CellLabel)
+
+data_consensus |>
+  filter(is_immune, !is.na(cell_type_unified_ensemble)) |>
+  group_by(cell_type_unified_ensemble, cell_type_unified, dataset_id) |>
+  summarise(NCells = n()) |>
+  group_by(cell_type_unified_ensemble, cell_type_unified) |>
+  summarise(NCells = sum(NCells), NDatasets = n()) |>
+  as_tibble() |>
+  filter(!cell_type_unified_ensemble %in% nonimmune) |>
+  mutate(
+    cell_type_unified_ensemble = factor(cell_type_unified_ensemble, cell_order),
+    cell_type_unified = factor(cell_type_unified, cell_order),
+    CellLabel = ifelse(NDatasets >= 3, NDatasets, "")
+  ) |>
+  heatmap(
+    .row = cell_type_unified,
+    .column = cell_type_unified_ensemble,
+    .value = NCells,
+    transform = log1p,
+    name = "log(NCells)",
+    row_title = "Unified",
+    column_title = "Ensemble",
+    cluster_rows = FALSE,
+    cluster_columns = FALSE
+  ) |>
+  layer_text(.value = CellLabel)
+data_consensus |>
+  filter(!is.na(cell_type_unified_ensemble) & !is.na(data_driven_consensus)) |>
+  group_by(cell_type_unified_ensemble, data_driven_consensus, dataset_id) |>
+  summarise(NCells = n()) |>
+  group_by(cell_type_unified_ensemble, data_driven_consensus) |>
+  summarise(NCells = sum(NCells), NDatasets = n()) |>
+  as_tibble() |>
+  filter(!cell_type_unified_ensemble %in% nonimmune) |>
+  mutate(
+    cell_type_unified_ensemble = factor(cell_type_unified_ensemble, cell_order),
+    data_driven_consensus = factor(data_driven_consensus, cell_order),
+    CellLabel = ifelse(NDatasets >= 3, NDatasets, "")
+  ) |>
+  heatmap(
+    .row = data_driven_consensus,
+    .column = cell_type_unified_ensemble,
+    .value = NCells,
+    transform = log1p,
+    name = "log(NCells)",
+    row_title = "Data driven ensemble",
+    column_title = "Ensemble",
+    cluster_rows = FALSE,
+    cluster_columns = FALSE
+  ) |>
+  layer_text(.value = CellLabel)
+```
+
+# Mapping summaries
+
+Here we break the links from cytotoxic cells to other cytotoxic cell types such as nk, ilc, tgd, and t cd8. These are useful for retaining higher level annotations but we want them to be an independent tree for the purposes of determining depth of annotation.
+
+```{r fig.height=9, fig.width=10}
+# build graph
+immune_adj = read.csv("./data/graphs/immune_tree.csv", check.names = FALSE, row.names = 1) |> 
+  as.matrix()
+immune_adj["cytotoxic", ] = 0
+immune_adj["monocytic", "macrophage"] = 0
+immune_ig = graph_from_adjacency_matrix(immune_adj)
+```
+
+In a compositional analysis, we will be selecting a specific level of the immune tree hierarchy. Below we collapse the nodes of the tree to a specific level and assess how many cells remain annotated at each level. As we go for finer resolutions, we get fewer cells annotated. The plot below shows that even at the finest resolution (L3), we get ~10M cells annotated.
+
+```{r fig.width=8, fig.height=5}
+map_level <- function(ctypes, ig, level = diameter(ig)) {
+  ig_diameter = igraph::diameter(ig)
+  ct_map = igraph::ego(ig, mode = "in", order = ig_diameter) |> 
+    sapply(\(x) {
+      x = rev(x$name)
+      x[min(length(x), level + 1)]
+    }) |> 
+    setNames(igraph::V(ig)$name)
+
+  # retain types of the matching level only
+  d = igraph::distances(ig, mode = "in")
+  d[is.infinite(d)] = NA
+  ct_level = apply(d, 1, max, na.rm = TRUE)
+  is_child = igraph::degree(ig, mode = "out") == 0
+  ct_map[ct_level[ct_map] != level & !is_child] = NA_character_
+  
+  setNames(list(ct_map[ctypes]), paste0("L", level)) |> 
+    as.data.frame()
+}
+
+df = data_consensus |> 
+  filter(is_immune) |> 
+  count(dataset_id, cell_type_unified_ensemble, name = "NCells") |> 
+  as_tibble()
+
+p1 = map(0:diameter(immune_ig), map_level, ctype = df$cell_type_unified_ensemble, ig = immune_ig) |> 
+  list_cbind() |> 
+  cbind(df) |> 
+  select(!c(dataset_id, cell_type_unified_ensemble)) |> 
+  pivot_longer(matches("L[0-9]+"), names_to = "Level", values_to = "CellType") |> 
+  filter(!is.na(CellType)) |> 
+  group_by(Level) |> 
+  summarise(
+    NCells = sum(NCells),
+    NCellTypes = length(unique(CellType))
+  ) |> 
+  ggplot(aes(Level, NCells / 1e6, fill = Level)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(as.numeric(as.factor(Level)), y = 16.25, label = NCellTypes)) +
+  scale_fill_scico_d(palette = "batlow") +
+  labs(y = "NCells (millions)") +
+  vissE::bhuvad_theme() +
+  theme(
+    panel.grid.minor.y = element_line(colour = "grey80"),
+    panel.grid.major.y = element_line(colour = "grey80")
+  )
+
+ct_level = igraph::ego(immune_ig, mode = "in", order = diameter(immune_ig)) |> 
+  sapply(\(x) length(x) - 1) |> 
+  setNames(igraph::V(immune_ig)$name)
+ct_ncells = df |>
+  group_by(cell_type_unified_ensemble) |>
+  summarise(NCells = sum(NCells)) |> 
+  as.data.frame()
+ct_ncells = setNames(ct_ncells[, 2], ct_ncells[, 1])
+p2 = immune_ig |> 
+  as_tbl_graph() |> 
+  activate(nodes) |> 
+  mutate(
+    Label = name,
+    Level = paste0("L", ct_level[name]),
+    NCells = ct_ncells[name]
+  ) |> 
+  ggraph(layout = "igraph", algorithm = "nicely") +
+  geom_edge_fan() +
+  geom_node_point(aes(size = NCells / 1e6, fill = Level), shape = 21) +
+  geom_node_text(aes(label = Label), repel = TRUE) +
+  scale_fill_scico_d(palette = "batlow", guide = guide_none()) +
+  labs(size = "NCells\n(Millions)") +
+  theme_void()
+
+p1 + p2 + plot_layout(guides = "collect") + plot_annotation(title = "Cells annotated at different hierarchies") & theme(legend.position = "bottom")
+```
+
+```{r}
+# export maps
+alltypes = V(immune_ig)$name
+
+level_map = (map_level(alltypes, immune_ig, 0) |> rownames_to_column("cell_type_unified_harmonised")) |> 
+  left_join((map_level(alltypes, immune_ig, 1) |> rownames_to_column("cell_type_unified_harmonised"))) |> 
+  left_join((map_level(alltypes, immune_ig, 2) |> rownames_to_column("cell_type_unified_harmonised"))) |> 
+  left_join((map_level(alltypes, immune_ig, 3) |> rownames_to_column("cell_type_unified_harmonised")))
+write.csv(level_map, "./data/caq_celltype_level_map.csv", row.names = FALSE)
+```
+
+# Resolving missing values at deeper annotation levels
+
+Some cells will have missing annotations at specific levels. This is because neither the original annotation, nor our annotation were able to further resolve their type in the cell type hierarcy. This can happen in three possible scenarios:
+
+1. Annotation is missing using one approach and the other is only able to provide a high level annotation.
+1. The low level annotation is the best possible using both approaches (one might have a higher level annotation).
+1. Cell types called using both approaches end up being siblings therefore the parent annotation is the best we can achieve.
+
+```{r}
+df = data_consensus |> 
+  filter(is_immune) |> 
+  count(dataset_id, cell_type_unified_ensemble, name = "NCells") |> 
+  as_tibble()
+
+map(3, map_level, ctype = df$cell_type_unified_ensemble, ig = immune_ig) |> 
+  list_cbind() |> 
+  cbind(df) |> 
+  as_tibble() |> 
+  filter(is.na(L3)) |> 
+  group_by(cell_type_unified_ensemble) |> 
+  summarise(
+    NCells = sum(NCells),
+    NDatasets = length(unique(dataset_id))
+  ) |> 
+  ungroup() |> 
+  mutate(
+    Level = factor(lvl_map[cell_type_unified_ensemble], levels = paste0("L", 0:diameter(immune_ig))),
+    cell_type_unified_ensemble = factor(cell_type_unified_ensemble, cell_order)
+  ) |> 
+  filter(!is.na(cell_type_unified_ensemble)) |> 
+  ggplot(aes(cell_type_unified_ensemble, NCells / 1e3, fill = Level)) +
+  geom_bar(stat = "identity") +
+  scico::scale_fill_scico_d(palette = "batlow", drop = FALSE) +
+  labs(x = "Ensemble reannotation", y = "NCells (1000s)") +
+  vissE::bhuvad_theme() +
+  theme(
+    panel.grid.minor.y = element_line(colour = "grey80"),
+    panel.grid.major.y = element_line(colour = "grey80"),
+    legend.position = "bottom"
+  )
+```
+
+```{r}
+l3na_celltypes = map(3, map_level, ctype = df$cell_type_unified_ensemble, i = immune_ig) |>
+  list_cbind() |>
+  cbind(df) |>
+  as_tibble() |>
+  filter(is.na(L3)) |>
+  select(cell_type_unified_ensemble) |>
+  distinct() |>
+  pull()
+
+map(0:3, map_level, ctype = df$cell_type_unified_ensemble, ig = immune_ig) |>
+  list_cbind() |>
+  cbind(df) |>
+  as_tibble() |> 
+  pivot_longer(matches("L[0-3]+"), names_to = "Level", values_to = "CellType") |> 
+  filter(!is.na(CellType)) |> 
+  distinct(dataset_id, cell_type_unified_ensemble, CellType, NCells) |> 
+  mutate(Level = if_else(cell_type_unified_ensemble %in% l3na_celltypes, lvl_map[cell_type_unified_ensemble], "L3")) |> 
+  group_by(CellType, Level) |> 
+  summarise(NCells = sum(NCells)) |> 
+  filter(CellType %in% l3na_celltypes) |> 
+  mutate(CellType = factor(CellType, cell_order)) |> 
+  ggplot(aes(CellType, NCells / 1e3, fill = Level)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scico::scale_fill_scico_d(palette = "batlow") +
+  labs(x = "Ensemble reannotation", y = "NCells (1000s)") +
+  vissE::bhuvad_theme() +
+  theme(
+    panel.grid.minor.y = element_line(colour = "grey80"),
+    panel.grid.major.y = element_line(colour = "grey80"),
+    legend.position = "bottom"
+  )
+```
+
+```{r fig.height=9, fig.width=10}
+colmap_l3na = RColorBrewer::brewer.pal(9, "Paired")
+names(colmap_l3na) = l3na_celltypes
+
+data_consensus |> 
+  filter(cell_type_unified_ensemble %in% l3na_celltypes) |> 
+  count(cell_type_unified, data_driven_consensus, name = "NCells") |> 
+  as_tibble() |> 
+  mutate(
+    cell_type_unified = if_else(is.na(cell_type_unified), "<NA>", cell_type_unified),
+    data_driven_consensus = if_else(is.na(data_driven_consensus), "<NA>", data_driven_consensus),
+    cell_type_unified = factor(cell_type_unified, c("<NA>", cell_order)),
+    data_driven_consensus = factor(data_driven_consensus, c("<NA>", cell_order)),
+    CellLabel = signif(NCells / 1e3, 3)
+  ) |> 
+  heatmap(
+    .row = cell_type_unified,
+    .column = data_driven_consensus,
+    .value = NCells,
+    transform = log1p,
+    name = "log(NCells)",
+    row_title = "Unified",
+    column_title = "Data driven ensemble",
+    cluster_columns = FALSE,
+    cluster_rows = FALSE
+  ) |> 
+  layer_text(.value = CellLabel, .size = 8)
+```
+
+```{r}
+data_consensus |>
+  filter(cell_type_unified %in% "other" | cell_type_unified_ensemble %in% "other") |>
+  count(cell_type_unified, cell_type_unified_ensemble, name = "NCells") |>
+  as_tibble() |> 
+  arrange(desc(NCells)) |> 
+  print(n = 50)
+```
+
+```{r}
+# Save the updated data_consensus into a new parquet file
+output_parquet_new = gsub(".parquet", "_new.parquet", output_parquet)
+data_consensus |> 
+  select(cell_, dataset_id, sample_id, cell_type_unified, cell_type_unified_ensemble, is_immune) |> 
+  collect() |> 
+  arrow::write_parquet(output_parquet_new)
+```
+
+# Dataset summaries
+
+```{r}
+# tissue map
+tissue_map = get_metadata() |>
+  distinct(tissue, tissue_harmonised) |>
+  as_tibble()
+
+# Read back
+data_consensus = data_consensus |>
+  left_join(tissue_map, copy = TRUE)
+```
+
+## Summary per dataset
+
+```{r fig.width=12, fig.height=4.5}
+tech = data_consensus |> 
+  distinct(assay) |> 
+  pull() |> 
+  sort()
+colmap_assay = c(RColorBrewer::brewer.pal(7, "Blues"), ggthemes::tableau_color_pal("Tableau 20")(18)) |> 
+  setNames(tech)
+data_consensus |> 
+  # filter(is_immune) |> 
+  count(dataset_id, sample_id, assay, name = "NCells") |> 
+  group_by(dataset_id, assay) |> 
+  summarise(NCells = sum(NCells), NSamples = n()) |> 
+  as_tibble() |> 
+  arrange(desc(NSamples), desc(NCells)) |> 
+  ggplot(aes(NSamples, NCells / NSamples, colour = assay)) +
+  geom_jitter(width = 0.05) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Samples", y = "Mean cells per sample", colour = "Technology", shape = "Primary data") +
+  scale_colour_manual(values = colmap_assay, guide = guide_legend(override.aes = list(shape = 15, size = 5))) +
+  vissE::bhuvad_theme()
+```
+
+```{r}
+summary_ds = data_consensus |>
+  filter(is_immune, !is.na(dataset_id)) |>
+  group_by(dataset_id) |>
+  summarise(
+    NCells_DS = n(),
+    NSamples_DS = n_distinct(sample_id),
+    NDonors_DS = n_distinct(donor_id),
+    NEthnicity_DS = n_distinct(self_reported_ethnicity),
+    NCellTypes_DS = n_distinct(cell_type_unified_ensemble),
+    NOrgans_DS = n_distinct(tissue_harmonised)
+  ) |>
+  as_tibble()
+summary_th = data_consensus |>
+  filter(is_immune, !is.na(dataset_id)) |>
+  group_by(tissue_harmonised) |>
+  summarise(
+    NCells_TH = n(),
+    NSamples_TH = n_distinct(sample_id),
+    NDonors_TH = n_distinct(donor_id),
+    NEthnicity_TH = n_distinct(self_reported_ethnicity),
+    NCellTypes_TH = n_distinct(cell_type_unified_ensemble),
+    NDatasets_TH = n_distinct(dataset_id)
+  ) |>
+  as_tibble()
+summary_ct = data_consensus |>
+  filter(is_immune, !is.na(dataset_id)) |>
+  group_by(cell_type_unified_ensemble) |>
+  summarise(
+    NCells_CT = n(),
+    NSamples_CT = n_distinct(sample_id),
+    NDonors_CT = n_distinct(donor_id),
+    NEthnicity_CT = n_distinct(self_reported_ethnicity),
+    NOrgans_CT = n_distinct(tissue_harmonised),
+    NDatasets_CT = n_distinct(dataset_id)
+  ) |>
+  as_tibble() |>
+  mutate(Level = if_else(cell_type_unified_ensemble %in% l3na_celltypes, lvl_map[cell_type_unified_ensemble], "L3"))
+```
+
+```{r fig.width=14, fig.height=10}
+data_consensus |>
+  filter(is_immune, !is.na(dataset_id), !is.na(cell_type_unified_ensemble)) |>
+  count(dataset_id, cell_type_unified_ensemble, name = "NCells") |>
+  as_tibble() |>
+  complete(dataset_id, cell_type_unified_ensemble, fill = list(NCells = 0)) |>
+  left_join(summary_ds) |>
+  left_join(summary_ct) |>
+  mutate(across(starts_with("N"), ~ log2(.x + 1))) |>
+  heatmap(
+    .row = cell_type_unified_ensemble,
+    .column = dataset_id,
+    .value = NCells,
+    name = "log(NCells)",
+    row_title = "Ensemble reannotation",
+    column_title = "Dataset",
+    row_title_side = "right",
+    column_title_side = "bottom",
+    show_column_names = FALSE
+  ) |>
+  # annotation_tile(Level, palette = colmap_lvl, annotation_label = "Level") |>
+  annotation_bar(NCells_CT, annotation_label = "log(Cells)", annotation_name_rot = 45) |>
+  annotation_bar(NSamples_CT, annotation_label = "log(Samples)", annotation_name_rot = 45) |>
+  annotation_bar(NDonors_CT, annotation_label = "log(Donors)", annotation_name_rot = 45) |>
+  annotation_bar(NOrgans_CT, annotation_label = "log(Organs)", annotation_name_rot = 45) |>
+  annotation_bar(NEthnicity_CT, annotation_label = "log(Ethnicities)", annotation_name_rot = 45) |>
+  annotation_bar(NCells_DS, annotation_label = "log(Cells)") |>
+  annotation_bar(NSamples_DS, annotation_label = "log(Samples)") |>
+  annotation_bar(NDonors_DS, annotation_label = "log(Donors)") |>
+  annotation_bar(NOrgans_DS, annotation_label = "log(Organs)") |>
+  annotation_bar(NEthnicity_DS, annotation_label = "log(Ethnicities)")
+```
+
+## Summary per organ
+
+```{r fig.width=12, fig.height=4.5}
+df = data_consensus |> 
+  filter(is_immune) |> 
+  count(dataset_id, sample_id, tissue_harmonised, name = "NCells") |> 
+  group_by(dataset_id, tissue_harmonised) |> 
+  summarise(NCells = sum(NCells), NSamples = n()) |> 
+  as_tibble() |> 
+  arrange(desc(NSamples), desc(NCells))
+
+tissue_map = df |> 
+  group_by(tissue_harmonised) |> 
+  summarise(NCells = sum(NCells)) |> 
+  mutate(tissue_simplified = if_else(rank(-NCells) < 20, tissue_harmonised, "other")) |> 
+  select(!NCells)
+
+df |> 
+  left_join(tissue_map) |> 
+  ggplot(aes(NSamples, NCells / NSamples, colour = tissue_simplified)) +
+  geom_jitter(width = 0.05) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Samples", y = "Mean cells per sample", colour = "Technology", shape = "Primary data") +
+  ggthemes::scale_colour_tableau(palette = "Tableau 20", guide = guide_legend(override.aes = list(shape = 15, size = 5), ncol = 2)) +
+  vissE::bhuvad_theme()
+```
+
+```{r fig.width=10, fig.height=10}
+data_consensus |>
+  filter(is_immune, !is.na(tissue_harmonised), !is.na(cell_type_unified_ensemble)) |>
+  count(tissue_harmonised, cell_type_unified_ensemble, name = "NCells") |>
+  as_tibble() |>
+  complete(tissue_harmonised, cell_type_unified_ensemble, fill = list(NCells = 0)) |>
+  left_join(summary_th) |>
+  left_join(summary_ct) |>
+  mutate(across(starts_with("N"), ~ log2(.x + 1))) |>
+  heatmap(
+    .row = cell_type_unified_ensemble,
+    .column = tissue_harmonised,
+    .value = NCells,
+    name = "log(NCells)",
+    row_title = "Ensemble reannotation",
+    column_title = "Organ",
+    row_title_side = "right",
+    column_title_side = "bottom"
+  ) |>
+  # annotation_tile(Level, palette = colmap_lvl, annotation_label = "Level") |>
+  annotation_bar(NCells_CT, annotation_label = "log(Cells)", annotation_name_rot = 45) |>
+  annotation_bar(NSamples_CT, annotation_label = "log(Samples)", annotation_name_rot = 45) |>
+  annotation_bar(NDonors_CT, annotation_label = "log(Donors)", annotation_name_rot = 45) |>
+  annotation_bar(NDatasets_CT, annotation_label = "log(Datasets)", annotation_name_rot = 45) |>
+  annotation_bar(NEthnicity_CT, annotation_label = "log(Ethnicities)", annotation_name_rot = 45) |>
+  annotation_bar(NCells_TH, annotation_label = "log(Cells)") |>
+  annotation_bar(NSamples_TH, annotation_label = "log(Samples)") |>
+  annotation_bar(NDonors_TH, annotation_label = "log(Donors)") |>
+  annotation_bar(NDatasets_TH, annotation_label = "log(Datasets)") |>
+  annotation_bar(NEthnicity_TH, annotation_label = "log(Ethnicities)")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

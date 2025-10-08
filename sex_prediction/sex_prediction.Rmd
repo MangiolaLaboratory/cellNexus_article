@@ -1,4 +1,19 @@
 
+# Wrap the package setup block with an Rmd chunk
+### Package setup and installation
+This chunk guarantees a reproducible environment by installing (if missing) and loading all required CRAN and Bioconductor packages used downstream.
+
+- What it does:
+  - Defines the complete dependency list, including modeling (`tidymodels`, `randomForest`), Bioconductor genomics tooling (`GenomicRanges`, `TxDb.*`, `AnnotationDbi`, `org.Hs.eg.db`), IO/utilities (`zellkonverter`, `scuttle`, `edgeR`, `BiocParallel`), and plotting (`ggplot2`, `patchwork`).
+  - Installs Bioconductor packages via `BiocManager::install` and CRAN packages via `install.packages`, only if not already present (checked with `requireNamespace`).
+  - Loads each package with `library(pkg, character.only = TRUE)` so the rest of the notebook can use their exported functions.
+- Why it’s here:
+  - Ensures the analysis is portable and can run on fresh machines/CI without manual setup.
+  - Centralizes all dependencies, making it easy to audit or pin.
+- Notes:
+  - Installation uses default stable repos; pinning versions can be added later if strict reproducibility is needed.
+
+```{r setup_install}
 # Load required libraries, installing if not present
 required_pkgs <- c(
   "GenomicRanges",
@@ -59,7 +74,22 @@ for (pkg in required_pkgs) {
   }
   library(pkg, character.only = TRUE)
 }
+```
 
+### Parallel setup
+This chunk configures parallel execution to accelerate preprocessing, cross-validation, and tuning.
+
+- What it does:
+  - Detects core count and allocates ~75% for analysis to avoid system thrashing (`parallel::detectCores`, `floor(n_cores*0.75)`).
+  - Sets the primary backend to `future` with `multisession` to parallelize across processes (safer for RStudio/Windows) and uses `future.apply` for compatibility with apply-style parallelism.
+  - Initializes a fallback `doParallel` PSOCK cluster for packages expecting a foreach-compatible backend and registers it via `registerDoParallel`.
+  - Prints backend diagnostics and runs a small `future_lapply` test to confirm that workers execute concurrently.
+- Why it’s here:
+  - Tidymodels resampling/tuning can leverage parallelization to reduce runtime; some steps rely on foreach APIs.
+- Notes:
+  - We prefer `future` as primary; `doParallel` is provided for compatibility in functions that rely on foreach.
+
+```{r parallel_setup}
 # Set up parallel processing for tidymodels
 cat("Setting up parallel processing...\n")
 n_cores <- parallel::detectCores()
@@ -97,8 +127,25 @@ cat("Parallel test result:", paste(unlist(test_result), collapse = ", "), "\n")
 # library(future)
 # plan(multisession, workers = n_workers)
 # cat("Using future backend with", n_workers, "workers\n")
+```
 
+### Function: add_chromosome_coordinates_fast
+Adds genomic coordinates to `rowRanges(se)` using pre-built TxDb gene models and `org.Hs.eg.db` mappings.
 
+- Inputs/assumptions:
+  - `se` has rownames that are either Ensembl IDs (optionally with version suffixes like `.1` or `_X`) or gene symbols.
+  - `genome_version` is `hg38` or `hg19` to select the proper TxDb.
+- How it works:
+  - Loads `TxDb.Hsapiens.UCSC.*.knownGene` to obtain a `GRanges` of all known genes (`GenomicFeatures::genes`). These are keyed by Entrez IDs.
+  - If Ensembl IDs are detected in `rownames(se)`, cleans version/suffixes, then maps Entrez→Ensembl via `AnnotationDbi::mapIds(org.Hs.eg.db, column="ENSEMBL", keytype="ENTREZID")` and attaches the Ensembl IDs to TxDb genes. It matches cleaned Ensembl IDs to this column.
+  - If gene symbols are detected, maps Entrez→SYMBOL and matches symbols to the user’s identifiers.
+  - Constructs a `GRanges` placeholder with length equal to the number of input genes, then fills coordinates (seqnames, ranges, strand) for matched rows.
+- Outputs:
+  - Returns the same `SummarizedExperiment` with `rowRanges(se)` populated where matches exist; reports how many genes were matched and lists unique chromosomes present for a quick QC.
+- Edge cases:
+  - If none match, it warns and returns `se` unchanged; partial matches are supported.
+
+```{r fn_add_chrom_coords_fast}
 #' Add chromosome coordinates using pre-built annotation tables (FASTER)
 #'
 #' This function uses pre-built Bioconductor annotation tables for much faster
@@ -182,11 +229,11 @@ add_chromosome_coordinates_fast <- function(se, genome_version = "hg38", verbose
     # Add Ensembl IDs to the genes GRanges
     genes_gr$ensembl_id <- entrez_to_ensembl
     
-      # Match user's Ensembl IDs with database
+    # Match user's Ensembl IDs with database
   if (verbose) {
     cat("Matching gene IDs to coordinates...\n")
   }
-  matched_indices <- match(clean_ensembl_ids, genes_gr$ensembl_id)
+    matched_indices <- match(clean_ensembl_ids, genes_gr$ensembl_id)
     
   } else {
     # Gene symbols - convert Entrez IDs to symbols
@@ -201,11 +248,11 @@ add_chromosome_coordinates_fast <- function(se, genome_version = "hg38", verbose
     # Add gene symbols to the genes GRanges
     genes_gr$gene_symbol <- entrez_to_symbol
     
-      # Match user's gene symbols with database
+    # Match user's gene symbols with database
   if (verbose) {
     cat("Matching gene symbols to coordinates...\n")
   }
-  matched_indices <- match(gene_ids, genes_gr$gene_symbol)
+    matched_indices <- match(gene_ids, genes_gr$gene_symbol)
   }
   
   # Count matches
@@ -282,7 +329,26 @@ add_chromosome_coordinates_fast <- function(se, genome_version = "hg38", verbose
   
   return(se)
 }
+```
 
+### Function: create_tissue_validation_split
+Builds a robust train/validation partition to test sex prediction on sex-specific tissues.
+
+- Inputs/assumptions:
+  - `colData(se)` contains `sex` (or `sex_column`) and `tissue_groups` (or `tissue_column`).
+  - `male_tissues` and `female_tissues` enumerate sex-specific tissues.
+- How it works:
+  - Filters to valid sex labels (case-insensitive, allows F/M) and standardizes to `female`/`male` to prevent label drift.
+  - Optionally excludes embryonic/fetal contexts (age >= 365 or textual filter) in the .R variant; here we focus on categorical split.
+  - Creates a categorical `tissue_category`: `male_specific`, `female_specific`, or `other` based on membership in the provided sets.
+  - Forms validation cohorts from sex-specific tissues (male-only tissues for male validation, female-only tissues for female validation) and uses all remaining `other` tissues as the training pool.
+  - If no sex-specific samples exist, falls back to sampling sex-balanced random validation cohorts to maintain a validation set.
+- Outputs:
+  - Returns the vector IDs for train/validation and prints distribution tables across tissues and categories for transparency.
+- Why it’s here:
+  - Validates that a model trained on non-sex-specific tissues generalizes to sex-specific tissues, a realistic deployment scenario.
+
+```{r fn_create_tissue_validation_split}
 #' Create tissue-specific validation sets for sex prediction
 #'
 #' This function splits a SummarizedExperiment object into tissue-specific validation sets
@@ -402,7 +468,23 @@ create_tissue_validation_split <- function(se,
     validation_metadata = validation_samples
   ))
 }
+```
 
+### Function: preprocess_for_sex_prediction
+Performs end-to-end preprocessing: coordinate annotation, scalable pseudobulk, feature scoring, sex-chromosome filtering, and data splits.
+
+- Steps/detail:
+  - Coordinate annotation: calls `add_chromosome_coordinates_fast` to enrich gene rows with genomic ranges for later sex-chromosome filtering.
+  - Chunked pseudobulk: splits columns (`colnames(se)`) into chunks to reduce peak memory, aggregates counts per `sample_id` via `scuttle::aggregateAcrossCells`, and concatenates chunk results.
+  - Assays: computes `logCPM` from counts using `edgeR::cpm(prior.count=1, log=TRUE)`, then derives `singscore` ranks with `singscore::rankGenes` applied to `logCPM`.
+  - Sex-chromosome filtering: keeps only `chrX` and `chrY` genes via `seqnames(rowRanges(se_pb))` to focus on sex-informative signals.
+  - Validation split: invokes `create_tissue_validation_split` on the processed SE to produce validation IDs, slices the validation SE, and standardizes factor levels.
+  - Train/test split: creates a stratified split on labeled samples (excludes unknown sex and validation IDs) using `rsample::initial_split` on metadata, then forms `se_train` and `se_test` by column selection.
+  - Size control: optionally subsamples `se_train` to cap very large datasets, improving downstream memory safety.
+- Outputs:
+  - Returns a list with `se_train`, `se_test`, `se_validation`, and full `se_processed`, and logs dimensions for traceability.
+
+```{r fn_preprocess_for_sex_prediction}
 #' Preprocess a SummarizedExperiment for sex prediction and create splits
 #'
 #' Performs coordinate annotation, pseudobulk aggregation in chunks, logCPM
@@ -456,19 +538,19 @@ preprocess_for_sex_prediction <- function(
 
   # Aggregate across cells in chunks to avoid high memory use
   cat("Preparing pseudobulk in chunks of", chunk_size, "columns...\n")
-  cols <- colnames(se)
+cols <- colnames(se)
   col_chunks <- split(cols, ceiling(seq_along(cols)/chunk_size))
   cat("Processing", length(col_chunks), "chunks for pseudobulk aggregation...\n")
 
   res <- purrr::map(col_chunks, function(chunk) {
     se_chunk <- se[, chunk]
     scuttle::aggregateAcrossCells(
-      se_chunk,
-      ids = colData(se_chunk)$sample_id,
-      store.number = TRUE,
-      BPPARAM = BiocParallel::MulticoreParam(workers = parallel::detectCores())
-    )
-  }, .progress = TRUE)
+    se_chunk,
+    ids = colData(se_chunk)$sample_id,
+    store.number = TRUE,
+    BPPARAM = BiocParallel::MulticoreParam(workers = parallel::detectCores())
+  )
+}, .progress = TRUE)  
 
   cat("Combining chunks...\n")
   se_pb <- do.call(cbind, res)
@@ -551,7 +633,25 @@ preprocess_for_sex_prediction <- function(
     se_processed = se_pb
   ))
 }
+```
 
+### Function: build_sex_prediction_model
+Builds a robust RF classifier with tidymodels, addressing label cleaning, feature selection, resampling, and optional hyperparameter tuning.
+
+- Data preparation:
+  - Extracts predictors from the specified assay (`singscore` by default) and merges with selected batch covariates from `colData(se)`.
+  - Standardizes and filters sex labels to `female`/`male`, removing unknown/NA, and ensures factors are well-formed for stratification.
+  - Drops zero-variance features and logs the final feature count.
+- Recipe and model:
+  - `recipes`: impute missing numeric predictors (median), remove zero-variance, normalize numeric predictors, and remove highly correlated features (threshold 0.95) to stabilize the RF.
+  - `parsnip`: defines a `randomForest` classifier; `mtry` can be tuned across a small grid, with v-fold CV used for selection (`metric_set(accuracy, roc_auc, sensitivity, specificity)`).
+- Resampling/tuning:
+  - Folds are bounded by class size (min of 5 and half the training rows) to avoid over-fragmentation on small datasets.
+  - If the dataset is extremely small, falls back to a simple internal split instead of CV and returns metrics accordingly.
+- Outputs:
+  - Finalized workflow fitted on the training set, train/test metrics, resampling metrics, predictions, and chosen hyperparameters when tuning was enabled.
+
+```{r fn_build_sex_prediction_model}
 # Build a random forest that is able to predict the sex of the samples
 # This should be robust to some simple covariates such as batch and batch effect correction and replicate
 # This should be robust to label swap in the training data
@@ -709,11 +809,11 @@ build_sex_prediction_model <- function(se, se_test = NULL, my_assay = "singscore
   
   # Create random forest model
   rf_model <- rand_forest(
-    trees = trees,
-    mtry = tune()
-  ) %>%
+      trees = trees,
+      mtry = tune()
+    ) %>%
     set_engine("randomForest") %>%
-    set_mode("classification")
+      set_mode("classification")
   
   # Create workflow
   workflow <- workflow() %>%
@@ -887,7 +987,20 @@ build_sex_prediction_model <- function(se, se_test = NULL, my_assay = "singscore
     best_params = best_model
   ))
 }
+```
 
+### Function: predict_sex_for_se
+Produces class predictions for each column in a `SummarizedExperiment` using a trained tidymodels workflow.
+
+- What it does:
+  - Constructs `new_data` by row-binding `colData(se)` with the transposed assay matrix so that predictors align by sample.
+  - Extracts the trained recipe from `workflow` to determine the exact set of predictor variable names used at training time.
+  - Adds any missing predictors (not present in `colData` or the assay) as `NA` columns to maintain schema compatibility; this avoids predict-time failures when metadata differs.
+  - Calls `predict(workflow, type="class")` and writes the resulting `.pred_class` factor to `colData(se)$sex_predicted`.
+- Notes:
+  - This does not return probabilities; add a separate call with `type="prob"` if you need calibrated scores.
+
+```{r fn_predict_sex_for_se}
 # Predict function: add sex_predicted to colData of a SummarizedExperiment
 #' Predict sex for all samples and write result to colData(se)$sex_predicted
 #'
@@ -948,8 +1061,12 @@ predict_sex_for_se <- function(se,
   colData(se)$sex_predicted <- class_pred$.pred_class
   se
 }
+```
 
+### Script setup (runtime)
+Loads modeling libraries and applies a conservative future plan for predictable memory use downstream.
 
+```{r script_setup_2}
 # Load tidymodels libraries
 library(tidymodels)
 library(randomForest)
@@ -959,9 +1076,19 @@ library(dplyr)
 # Set memory limits for parallel processing
 options(future.globals.maxSize = 4 * 1024^3)  # 4GB limit - more conservative
 options(future.plan = "multisession", workers = 4)  # Use 4 workers instead of 10
+```
 
- 
+### Part 1: Preprocessing I/O
+Handles data ingestion and preprocessing orchestration.
 
+- What it does:
+  - Reads the `H5AD` pseudobulk object with `zellkonverter::readH5AD` using HDF5-backed storage to reduce RAM pressure.
+  - Calls `preprocess_for_sex_prediction` to annotate coordinates, aggregate counts, build assays (`logCPM`, `singscore`), filter sex chromosomes, and split into `se_train`, `se_test`, `se_validation`.
+  - Persists the split object to disk and reloads it to ensure the analysis can be restarted cheaply and deterministically.
+- Notes:
+  - Adjust `chunk_size` in preprocessing if IO or memory constraints change.
+
+```{r part1_preprocessing, message=TRUE}
 ## === Part 1: Preprocessing to obtain train / test / validation ===
 cat("Reading H5AD file...\n")
 se_raw <- zellkonverter::readH5AD("~/Downloads/pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE)
@@ -985,8 +1112,19 @@ splits <- readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction_splits.rd
 se_train <- splits$se_train
 se_test <- splits$se_test
 se_validation <- splits$se_validation
+```
 
+### Part 2: Model training
+Fits the RF model and reports training/test performance.
 
+- What it does:
+  - Invokes `build_sex_prediction_model` with the preselected assay and batch covariates to construct the workflow and (if applicable) tune `mtry`.
+  - Saves the resulting object (workflow, metrics, predictions) to disk for reuse (e.g., prediction on unlabeled data).
+  - Prints training metrics (and test metrics when `se_test` exists and passes sanity checks).
+- Notes:
+  - For reproducibility, seeds are fixed; bump `trees` or adjust `batch_columns` depending on your metadata richness.
+
+```{r part2_train_model}
 ## === Part 2: Train model and keep trained workflow for prediction ===
 cat("Building sex prediction model on training data...\n")
 sex_model_results <- build_sex_prediction_model(
@@ -1011,8 +1149,19 @@ if (!is.null(sex_model_results$test_metrics)) {
   cat("\n=== Test Performance ===\n")
   print(sex_model_results$test_metrics)
 }
+```
 
+### Model performance summary (static notes)
+Reference results from a representative run to contextualize observed metrics.
 
+- What it contains:
+  - Typical cross-validation means ± sd for accuracy, AUC, sensitivity, specificity.
+  - Standalone test performance on a held-out set to validate generalization.
+  - Data scale (train/test size, number of features, folds) to interpret variance and runtime.
+- Notes:
+  - Your actual numbers may vary slightly due to splits, randomness, and dataset drift; use this section as a target range.
+
+```{r performance_summary}
 # === Model Performance Summary ===
 # The following results summarize the model's performance on both cross-validation and test sets.
 #
@@ -1032,8 +1181,20 @@ if (!is.null(sex_model_results$test_metrics)) {
 #   - Test samples:     1975
 #   - Features used:    371
 #   - Cross-validation folds: 5
+```
 
+### Part 3: Validation application
+Evaluates the trained model on the sex-specific validation set and summarizes results by tissue.
 
+- What it does:
+  - Uses the trained workflow to predict class probabilities and labels on `se_validation` (assembled from sex-specific tissues by prior split rules).
+  - Computes overall metrics (accuracy, AUC, etc.) using `yardstick` and prints them for quick assessment.
+  - Aggregates accuracy by `tissue_groups` to identify tissues where performance differs, sorted by sample size to prioritize reliable estimates.
+  - Prints top-importance features (when available from the randomForest engine) to provide biological interpretability cues.
+- Notes:
+  - If no validation samples exist (dataset-dependent), the code logs a message and skips evaluation.
+
+```{r part3_validation_application}
 ## === Part 3: Prediction function and validation application ===
 cat("\n=== Tissue-Specific Validation ===\n")
 cat("Validating on sex-specific tissues...\n")
@@ -1075,8 +1236,8 @@ cat("Sex levels in validation predictions:", paste(levels(validation_predictions
     arrange(desc(n_samples))
   
     print(tissue_performance)
-  
-  # Extract the trained model for future predictions
+
+# Extract the trained model for future predictions
 trained_model <- sex_model_results$workflow
 
 # Display feature importance (if available)
@@ -1088,12 +1249,21 @@ if ("randomForest" %in% class(extract_fit_engine(trained_model))) {
     print(top_features)
   }
 }
+```
 
-# Plot loadings of top_features PCA
-# Plot feature importance (if available)
-cat("Top 10 most important features:\n")
-print(top_features)
+### ROC curve and feature importance
+Visualizes classifier discrimination and interprets the model via feature importance.
 
+- ROC:
+  - Uses `yardstick::roc_curve` on training predictions to compute sensitivity vs 1-specificity across thresholds.
+  - Plots the ROC with a diagonal reference; AUC complements earlier printed metrics.
+- Feature importance:
+  - Extracts `randomForest` importance (MeanDecreaseGini) and maps Ensembl→SYMBOL using `org.Hs.eg.db` to improve readability.
+  - Displays the top 20 genes; these are strong candidates for biological inspection and can guide follow-up curation.
+- Notes:
+  - Importance is model/engine-dependent; for other engines, use the appropriate VIP methods.
+
+```{r roc_and_importance}
 # === ROC Curve and Feature Importance ===
 cat("\n=== ROC Curve and Feature Importance ===\n")
 
@@ -1154,7 +1324,21 @@ importance_scores <- extract_fit_engine(sex_model_results$workflow)$importance
 
 
 detach("package:org.Hs.eg.db", unload = TRUE)
+```
 
+### Predictions on unknown samples and plotting
+Applies the trained model to samples with unknown/NA sex, then summarizes and visualizes predictions across tissues.
+
+- What it does:
+  - Logs run completion status and prepares the processed SE to subset unknown samples.
+  - Filters unknown samples to adult-like criteria (age_days ≥ 365 or missing but not fetal/embryonic contexts by title regex) to match training distributional assumptions.
+  - Adds `sex_predicted` to `colData` using `predict_sex_for_se`.
+  - Produces counts by `tissue_groups × sex_predicted` (and optionally age bin) for export and inspection.
+  - Creates a bar chart of predicted sex across tissues using a red/blue palette for quick visual comparison, and saves the combined ROC/importances/prediction plot.
+- Notes:
+  - If `sex_predicted` is missing (edge case), plotting is skipped with a warning.
+
+```{r unknown_predictions}
 # Now predict for the unknown samples
 # remotes::install_github("MangiolaLaboratory/cellNexus", force = TRUE)
 # library(cellNexus)
@@ -1252,3 +1436,4 @@ ggsave(
   p, units = "mm", 
   width = 90, height = 45, scale = 3
 )
+```
