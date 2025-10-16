@@ -557,7 +557,7 @@ cols <- colnames(se)
 
   # Persist intermediate (optional)
   try({
-    saveRDS(se_pb, "~/Documents/GitHub/article_cellNexus/pseudobulk_se_X_Y_subset_sample_id.rds")
+    saveRDS(se_pb, "~/Documents/GitHub/article_cellNexus/sex_prediction/pseudobulk_se_X_Y_subset_sample_id.rds")
   }, silent = TRUE)
 
   # Filter out samples with zero counts
@@ -1088,7 +1088,7 @@ Handles data ingestion and preprocessing orchestration.
 - Notes:
   - Adjust `chunk_size` in preprocessing if IO or memory constraints change.
 
-```{r part1_preprocessing, message=TRUE}
+```{r part1_preprocessing, message=TRUE, eval=FALSE}
 ## === Part 1: Preprocessing to obtain train / test / validation ===
 cat("Reading H5AD file...\n")
 se_raw <- zellkonverter::readH5AD("~/Downloads/pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE)
@@ -1105,9 +1105,11 @@ splits <- preprocess_for_sex_prediction(
 )
 
 # Save the splits
-saveRDS(splits, "~/Documents/GitHub/article_cellNexus/sex_prediction_splits.rds")
+saveRDS(splits, "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_splits.rds")
+```
 
-splits <- readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction_splits.rds")
+```{r read splits}
+splits <- readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_splits.rds")
 
 se_train <- splits$se_train
 se_test <- splits$se_test
@@ -1124,7 +1126,7 @@ Fits the RF model and reports training/test performance.
 - Notes:
   - For reproducibility, seeds are fixed; bump `trees` or adjust `batch_columns` depending on your metadata richness.
 
-```{r part2_train_model}
+```{r part2_train_model, eval=FALSE}
 ## === Part 2: Train model and keep trained workflow for prediction ===
 cat("Building sex prediction model on training data...\n")
 sex_model_results <- build_sex_prediction_model(
@@ -1139,7 +1141,7 @@ sex_model_results <- build_sex_prediction_model(
 )
 
 # save model
-saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction_model.rds")
+saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_model.rds")
 
 # Print training metrics
 cat("\n=== Training Performance ===\n")
@@ -1195,6 +1197,10 @@ Evaluates the trained model on the sex-specific validation set and summarizes re
   - If no validation samples exist (dataset-dependent), the code logs a message and skips evaluation.
 
 ```{r part3_validation_application}
+
+# Read models
+sex_model_results = readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_model.rds")
+
 ## === Part 3: Prediction function and validation application ===
 cat("\n=== Tissue-Specific Validation ===\n")
 cat("Validating on sex-specific tissues...\n")
@@ -1415,13 +1421,10 @@ plot_unknown_prediction <-
   colData(se_unknown_filtered) |> 
     as.data.frame() |>
     as_tibble() |>
-    count(tissue_groups, sex_predicted) |>
+    dplyr::count(tissue_groups, sex_predicted) |>
     arrange(desc(n)) |>
-    write.csv("~/Documents/GitHub/article_cellNexus/unknown_prediction_counts.csv", row.names = FALSE)
-} else {
-  cat("Warning: sex_predicted column not found in se_unknown_filtered. Skipping unknown prediction plot.\n")
-  plot_unknown_prediction <- NULL
-}
+    write.csv("~/Documents/GitHub/article_cellNexus/sex_prediction/unknown_prediction_counts.csv", row.names = FALSE)
+
 
 # Use patchwork to combine the plots
 library(patchwork)
@@ -1432,7 +1435,7 @@ p = plot_roc + plot_importance + plot_unknown_prediction
 p = p + plot_layout(guides = "collect")
 
 ggsave(
-  "~/Documents/GitHub/article_cellNexus/sex_prediction_plots.pdf", 
+  "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_plots.pdf", 
   p, units = "mm", 
   width = 90, height = 45, scale = 3
 )
