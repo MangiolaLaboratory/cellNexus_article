@@ -1,0 +1,451 @@
+---
+title: "CellNexus Doublet Differential Expression Analysis"
+author: "Mengyuan Shen"
+format:
+  html:
+    theme: minty
+    df-print: paged
+    code-line-numbers: true
+    embed-resources: true
+    code-fold: true
+    code-fold-default: true
+knitr:
+  opts_chunk:
+    message: false
+    warning: false
+    echo: true
+---
+
+# Introduction
+
+This report provides an overview of doublet differential expression analysis from cellNexus. It outlines the workflow steps, including data filtering, pseudobulk aggregation, quality control, dispersion estimation, DE analysis, and visualization.
+
+```{r setup}
+library(ggalluvial)
+library(stringr)
+library(ggfittext)
+library(dplyr)
+library(purrr)
+library(targets)
+library(ggplot2)
+library(SummarizedExperiment)
+library(SingleCellExperiment)
+library(hrbrthemes)
+library(viridis)
+library(packcircles)
+library(ggrepel)
+library(patchwork)
+library(cellNexus)
+library(tidySingleCellExperiment)
+library(tidybulk)
+library(edgeR)
+library(tidySummarizedExperiment)
+library(tidyr)
+source("/Users/shen.m/projects/cellNexus/preprint/plot_custom_theme.R")
+source("/Users/shen.m/projects/cellNexus/preprint/CAQ_age_analysis_functions.R")
+```
+
+# Load and process data
+```{r}
+cell_metadata <- get_metadata(get_metadata_url(databases = "metadata.1.0.12.parquet"))
+age_groups_tbl = cell_metadata |> distinct(sample_id, age_days, sex) |> 
+  mutate(sex = ifelse(is.na(sex), "unknown", sex)) |> as_tibble() |>
+  mutate(age_groups = coarse_age_bin(age_days, sex),
+         age_groups_fine= age_bin(age_days, sex))
+
+cell_metadata = cell_metadata |> 
+  mutate(tissue_groups = ifelse(tissue %in% c("nose skin", "scalp"),
+                                "integumentary system (skin)",
+                                tissue_groups),
+         age_years = age_days/365.25,
+         sex = ifelse(is.na(sex), "unknown", sex),
+         scaled_nCount_RNA = log(nCount_RNA)) |> 
+  left_join(ethnicity_grouped, copy=T ) |> 
+  left_join(disease_data_grouped, copy=T) |>
+  left_join(disease_data_grouped_coarse, copy = T) |>
+  left_join(age_groups_tbl, copy = T) |> 
+  left_join(shorten_technology_label, copy = T)
+```
+
+
+# Data Filtering and Pseudobulk Aggregation
+
+This section filters cell metadata to select 195 samples from healthy European males aged 18–59, derived from blood tissue in two large datasets. It then identifies samples containing both singlet and doublet cells and aggregates the single-cell data into pseudobulk profiles for downstream analysis.
+
+```{r}
+# Filter metadata for relevant cells
+x = cell_metadata |> filter(tissue_groups == "Blood",
+                            disease == "normal",
+                            ethnicity_groups == "European",
+                            age_groups == "18-59",
+                            sex == "male",
+                            dataset_id %in% c("3faad104-2ab8-4434-816d-474d8d2641db",
+                                              "b0e547f0-462b-4f81-b31b-5b0a5d96f537"),
+                            empty_droplet == FALSE,
+                            alive == TRUE,
+                            scDblFinder.class != "Unknown") |>
+  select(-run_from_cell_id, -X_umap1,-x_approximate_distribution,-X_umap2,
+         -contains("metacell_"))
+
+samples_celtype_single_doublet_tbl = x |>
+  dplyr::count(sample_id, cell_type_unified_ensemble, scDblFinder.class, name = "n_cells") |>
+  filter(n_cells > 10) |> 
+  collect() |> 
+  
+  # For each sample and cell_type, keep those have both singlet and doublet
+  dplyr::group_by(sample_id, cell_type_unified_ensemble) |>
+  dplyr::filter(all(c("singlet", "doublet") %in% scDblFinder.class)) |>
+  dplyr::ungroup()
+
+```
+
+```{r eval=FALSE}
+sce = x |> 
+  inner_join(samples_celtype_single_doublet_tbl |> 
+               select(-n_cells), copy = T) |> 
+  get_single_cell_experiment(cache_directory = "~/scratch/cellNexus")
+
+cores = parallel::detectCores()-1
+pseudobulk <- scuttle::aggregateAcrossCells(
+  sce,
+  colData(sce)[,c("sample_id","cell_type_unified_ensemble","scDblFinder.class")] |> 
+    as_tibble(rownames = ".cell") |>
+    mutate(aggregated_cells = paste(sample_id, cell_type_unified_ensemble,scDblFinder.class, sep = "___")) |>
+    pull(aggregated_cells),
+  BPPARAM = BiocParallel::MulticoreParam(workers = cores, progressbar = T)
+)
+```
+
+```{r echo=FALSE}
+# Optionally, load from HDF5 if available
+pseudobulk = HDF5Array::loadHDF5SummarizedExperiment("~/projects/cellNexus/preprint/data/doublet_de_1_0_12/")
+
+```
+
+# Pseudobulk Data Group Composition
+## Sample and cell type summary
+This section visualises the distribution of aggregated samples across different cell types and doublet/singlet status.
+
+```{r}
+# Number of singlet and doublet pseudobulk samples
+pseudobulk |> dplyr::count(scDblFinder.class, name = "n_pseudobulk_sample") |> 
+  mutate(scDblFinder.class = factor(scDblFinder.class, levels = c("singlet", "doublet"))) |>
+  ggplot(aes(x = scDblFinder.class, y = n_pseudobulk_sample, fill = scDblFinder.class)) +
+  geom_col(width = 0.6) +
+  labs(
+    x = "scDblFinder Class",
+    y = "Number of Aggregated Samples"
+  ) +
+  scale_fill_manual(values = c("singlet" = "steelblue", "doublet" = "salmon")) +
+  theme_minimal()
+```
+
+```{r fig.width=10, fig.height=6}
+# Number of pseudobulk samples per cell type and class
+pseudobulk |>
+  dplyr::count(cell_type_unified_ensemble, scDblFinder.class, name = "n_pseudobulk_sample") |>
+  group_by(cell_type_unified_ensemble) |>
+  mutate(total = sum(n_pseudobulk_sample)) |>
+  ungroup() |>
+  mutate(
+    cell_type_unified_ensemble = fct_reorder(cell_type_unified_ensemble, total, .desc = TRUE),
+    scDblFinder.class = factor(scDblFinder.class, levels = c("singlet", "doublet"))
+  ) |>
+  ggplot(aes(
+    x = scDblFinder.class,
+    y = n_pseudobulk_sample,
+    fill = scDblFinder.class
+  )) +
+  geom_col(width = 0.6) +
+  facet_grid(~cell_type_unified_ensemble, switch = "x", scales = "free_x") +
+  labs(
+    x = "scDblFinder Class",
+    y = "Number of Pseudobulk Samples"
+  ) +
+  scale_fill_manual(values = c("singlet" = "steelblue", "doublet" = "salmon")) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    strip.placement = "outside",
+    strip.background = element_blank()
+  )
+```
+
+## Filtering Summary
+This section compares the number of samples and the proportions of cell types before and after filtering. This section demonstrates the impact of filtering on the dataset, showing how many samples and which cell types are retained.
+
+```{r}
+# Sample count before and after filtering
+x |> left_join(samples_celtype_single_doublet_tbl |> 
+                 mutate(filtered = TRUE), copy = T) |>
+  mutate(filtered = ifelse(is.na(filtered), FALSE, filtered)) |>
+  group_by(filtered) |> 
+  summarise(n_samples = n_distinct(sample_id)) |>
+  ggplot(aes(x = filtered, y = n_samples, fill = filtered)) +
+  geom_col(width = 0.6) +
+  labs(
+    title = "Number of Sample IDs Before and After Filtering",
+    x = "",
+    y = "Sample Count"
+  ) +
+  scale_x_discrete(labels = c("FALSE" = "Before", "TRUE" = "After")) +
+  scale_fill_manual(values = c("FALSE" = "grey70", "TRUE" = "steelblue")) +
+  theme_minimal()
+```
+
+```{r}
+x |> left_join(samples_celtype_single_doublet_tbl |> 
+                 mutate(filtered = TRUE), copy = T) |>
+  mutate(filtered = ifelse(is.na(filtered), FALSE, filtered)) |>
+  dplyr::count(filtered, cell_type_unified_ensemble, name = "n_cells") |>
+  group_by(filtered) |>
+  mutate(proportion = n_cells / sum(n_cells)) |>
+  ungroup() |>
+  ggplot(aes(
+    x = reorder(cell_type_unified_ensemble, -proportion, decreasing=T),
+    y = proportion,
+    fill = filtered
+  )) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = c("FALSE" = "grey70", "TRUE" = "steelblue"),
+                    labels = c("Before", "After")) +
+  labs(
+    title = "Cell Type Proportions Before and After Filtering",
+    x = "Cell Type",
+    y = "Proportion",
+    fill = "Filtering Status"
+  ) +
+  theme_minimal()
+```
+
+# QC and Normalization
+
+This section performs quality control and normalization on the pseudobulk data. Outlier counts are capped at the 99th percentile per sample, and normalization (e.g., TMM) is applied. It visualizes the distribution of raw and normalized counts to assess the effect of normalization.
+
+```{r}
+se = pseudobulk |>
+  as("SummarizedExperiment")
+rownames(se) <- rowData(pseudobulk) |> rownames()
+
+# Quantile 99% Per Sample to cap outliers
+counts <- assay(se, "counts") |> as.matrix()
+cap_thresholds <- apply(counts, 2, function(col) quantile(col, probs = 0.99, na.rm = TRUE))
+counts_capped <- sweep(counts, 2, cap_thresholds, FUN = pmin)
+assay(se, "counts") <- counts_capped
+
+se_norm = se |> scale_abundance()
+
+# Plot counts and scaled counts distribution
+df_long <- se_norm %>%
+  pivot_longer(
+    cols = c(counts, counts_scaled),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  mutate(type = recode(type,
+                       counts = "Raw counts",
+                       counts_scaled = "TMM normalized counts"))
+
+ggplot(df_long, aes(x = value)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white", linewidth = 0.2) +
+  scale_x_log10() +
+  facet_wrap(~type, scales = "free") +
+  labs(
+    x = expression(log[10]~"(Count)"),
+    y = "Frequency",
+    title = "Distribution of Raw vs TMM-normalized Counts"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+```
+
+# Gene Filtering and Dispersion
+This section evaluates how varying minimum count-per-million (minCPM) thresholds affect gene retention and dispersion estimates. For each threshold value (0 to 50), genes with low expression are filtered out, followed by normalization and dispersion estimation using a basic design model. The number of retained genes is recorded, and the biological coefficient of variation (BCV) plots are generated to assess variance trends across thresholds. These plots help inform the choice of an appropriate minCPM cutoff for downstream differential expression analysis.
+
+::: {.panel-tabset group="minCPM"}
+```{r}
+#| output: asis
+#| warning: false
+#| echo: true
+#| fig-width: 6
+#| fig-height: 5
+
+thresholds <- seq(0, 50, by = 10)
+gene_counts <- data.frame(threshold = thresholds, n_genes = NA)
+
+for (i in seq_along(thresholds)) {
+  thres <- thresholds[i]
+  se_filt <- se |> keep_abundant(minimum_count_per_million = thres) |> scale_abundance()
+  design <- model.matrix(
+    ~ scDblFinder.class,
+    data = as.data.frame(colData(se_filt))
+  )
+  n_genes <- nrow(se_filt)
+  gene_counts$n_genes[i] <- n_genes
+  disp <- estimateDisp(se_filt, design = design)
+
+  cat("## Threshold: ", thres, "\n\n")
+  plotBCV(disp, main = paste("BCV Plot - minCPM =", thres))
+  cat('\n\n')
+}
+```
+:::
+
+```{r}
+# Plot number of genes retained at each threshold
+ggplot(gene_counts, aes(x = threshold, y = n_genes)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "Minimum count per million (CPM)",
+    y = "Number of genes retained",
+    title = "Genes retained after minCPM filter"
+  ) +
+  theme_minimal()
+```
+
+We selected a minimum CPM threshold of 30 for the differential expression analysis, as it effectively reduces noise while retaining biologically meaningful genes.
+
+# Differential Expression Analysis
+
+This section performs differential expression analysis between doublet and singlet pseudobulk samples, adjusting for cell type and dataset. The section identifies significantly differentially expressed genes and extracts the top genes for further visualization.
+
+```{r}
+se_filtered = se |> keep_abundant(minimum_count_per_million = 30) |> scale_abundance()
+
+tbl = se_filtered |> 
+  mutate(scDblFinder.class = factor(scDblFinder.class, levels = c("singlet", "doublet"))) |>
+  mutate(cell_type_unified_ensemble_fixed = str_replace_all(cell_type_unified_ensemble, "[ /]", "_"),
+         dataset_id_fixed = str_replace_all(dataset_id, "-", "_")) |> 
+  test_differential_abundance(
+    .formula = ~ cell_type_unified_ensemble_fixed + dataset_id_fixed + scDblFinder.class,
+    .contrasts = c("scDblFinder.classdoublet"),
+    omit_contrast_in_colnames = TRUE
+  ) |> 
+  mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+                                        keys = as.character(.feature), 
+                                        keytype = "ENSEMBL", 
+                                        column="SYMBOL", 
+                                        multiVals = "first")) |> 
+  distinct(.feature, symbol, logFC, logCPM, F, PValue, FDR, .feature) |> 
+  as_tibble() 
+```
+
+# MA Plot
+MA plot is used to visualize the relationship between gene expression (log CPM) and log fold change between doublets and singlets. Significant genes are highlighted, providing a global view of differential expression results.
+
+```{r fig.width=6, fig.height=5}
+MA_p <- tbl |> 
+  ggplot(aes(x = logCPM, y = logFC, color = FDR < 0.05)) +
+  geom_point( size = 0.1) +
+  scale_color_manual(values = c("black", "red")) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "MA Plot",
+    x = "log CPM",
+    y = "log Fold Change"
+  ) +   theme_multipanel
+MA_p
+```
+
+# Volcano Plot
+
+Volcano plot is generated to display the significance versus logFC (fold change) for all genes. Top significant genes are labeled, and up/down-regulated genes are color-coded, making it easy to identify the most differentially expressed genes.
+
+```{r fig.width=6, fig.height=4}
+tbl = tbl |> 
+  filter(!is.na(symbol)) |> 
+  mutate(significant = FDR < 0.05 & abs(logFC) >=0.7) 
+
+sig_symbols <- tbl |> 
+  filter(logFC>0 & significant) |> arrange(PValue) |>slice_head(n=3) |> 
+  bind_rows(
+    tbl |> filter(logFC<0 & significant) |> arrange(PValue) |>slice_head(n=3)
+  ) |> pull(symbol) |> unique() # top DE genes
+
+high_logfc_symbols <- tbl |> 
+  filter(logFC > 0) |> 
+  arrange(desc(logFC)) |> 
+  slice_head(n = 3) |> 
+  bind_rows(
+    tbl |> 
+      filter(logFC < 0) |> 
+      arrange(logFC) |> 
+      slice_head(n = 3)
+  ) |> 
+  distinct(symbol) |> 
+  pull(symbol)
+
+topgenes_symbols <- c(sig_symbols, high_logfc_symbols)
+
+tbl_volcano <- tbl |> 
+  mutate(
+    significant = FDR < 0.05 & abs(logFC) >=0.7,
+    symbol = as.character(symbol),
+    symbol = ifelse(symbol %in% topgenes_symbols, symbol, ""),
+    color_group = case_when(significant & logFC > 0 ~ "up",
+                            significant & logFC < 0 ~ "down",
+                            TRUE ~ "ns"))
+
+volcano_p <- ggplot(tbl_volcano, aes(
+  x = logFC,
+  y = -log10(PValue)
+)) +
+  geom_point(aes(
+    color = color_group,
+    size = significant,
+    alpha = significant
+  )) +
+  ggrepel::geom_text_repel(
+    data = tbl_volcano %>% filter(symbol != "", color_group!= "ns"),
+    aes(label = symbol),
+    box.padding = 0.1,
+    size = 2,
+    nudge_y = -0.02,
+    max.overlaps = Inf,
+    segment.size = 0.2,
+    segment.color = "grey50"
+  ) +
+  theme(axis.title.x = element_text(hjust = 0.5)) +
+  scale_x_continuous(
+    limits = c(-max(abs(tbl$logFC), na.rm = TRUE), max(abs(tbl$logFC), na.rm = TRUE)),
+    name = expression(log[2] ~ "fold change (doublet vs singlet)")
+  ) +
+  labs(y = expression(-log[10]~"P value")) +
+    scale_color_manual(values = c("up" = "#e11f28", "down" = "#2166ac", "ns" = "black"),
+                       guide = "none") +
+  scale_size_manual(values = c(`TRUE` = 0.5, `FALSE` = 0.2)) + 
+  theme_multipanel +
+    theme(axis.title.x = element_text(hjust = 0.5) ,
+          axis.text.x = element_text(size = 5, hjust = 1)) +
+    theme(legend.position = "none") +
+    guides(fill = "none", color = "none")
+volcano_p
+``` 
+Core doublet-upregulated = cell cycle + ribosomal + mixed lineage markers
+STMN1 and SSRP1 make sense for doublet-up in blood pseudobulk; the others are not classic doublet markers and are more “dataset-specific / load” than “core doublet.”
+
+Labelled upregulated genes:
+•	STMN1 — plausible. Cell-cycle/microtubule; very commonly higher in doublets.
+•	SSRP1 — plausible. FACT complex/chromatin; tracks proliferation/DNA replication load.
+•	PGM2L1 — nonspecific metabolic/housekeeping; can drift up with bigger libraries but not a hallmark.
+•	APPL1 — adaptor/scaffold, broadly expressed; not a known doublet flag.
+•	COQ10B —️ mito-related; could reflect higher mitochondrial content in doublets, but not a standard marker.
+•	FHIT —️ tumor-suppressor/fragile site; not a canonical doublet gene in blood.
+
+Labelled downregulated genes:
+APOBEC3G fits this model. The others (CFAP68, C12orf75, CHFR, RALBP1, PWWP3A) don’t have strong links to blood biology or doublets and are likely statistical noise, low-expression artifacts, or dataset-specific quirks.
+
+•	Antiviral cytidine deaminase, highly expressed in lymphocytes (esp. T and NK cells). If doublets “dilute” lineage-specific signatures (e.g. a T cell mixed with something else), lineage-defining transcripts like APOBEC3G can appear down.
+
+::: {.callout-note collapse="true" title="Session Info"}
+```{r}
+sessionInfo()
+```
+:::
