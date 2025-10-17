@@ -1,0 +1,36 @@
+tissue_label,tissue_groups
+Eye,sensory-related structures
+Nose,"nasal, oral, and pharyngeal regions"
+Salival gld,miscellaneous glands
+"Esophagus, Trachea",oesophagus
+"Esophagus, Trachea",trachea
+Blood,blood
+Breast,breast
+Liver,gastrointestinal accessory organs
+Adrenal,endocrine system
+Pancreas,gastrointestinal accessory organs
+"Uterus, Placenta",female reproductive system
+Ovary,ovary
+Bladder,renal system
+Rectum,large intestine
+Sk muscle,muscular system (skeletal muscles)
+Brain,general brain and major structures
+Brain,cerebral lobes and cortical areas
+Brain,limbic and basal systems
+Brain,brainstem and cerebellar structures
+Mucosa,epithelium and mucosal tissues
+Thyroid,endocrine system
+Lymph nd,lymphatic system
+Lungs,respiratory system
+Thymus,thymus
+Heart,cardiovascular system
+Kidney,renal system
+Spleen,spleen
+Stomach,stomach
+Skin,integumentary system (skin)
+Intestine,small intestine
+Intestine,large intestine
+Adipose,adipose tissue
+Prostate,prostate
+Bone,bone marrow
+Bone,connective tissue

@@ -1,0 +1,31 @@
+tissue_label,macrocategory
+Eye,Other
+Nose,Respiratory
+Salival gld,Digestive
+"Esophagus, Trachea",Respiratory
+Blood,Immune
+Breast,Reproductive
+Liver,Digestive
+Adrenal,Other
+Pancreas,Digestive
+"Uterus, Placenta",Reproductive
+Ovary,Reproductive
+Bladder,Urinary
+Rectum,Digestive
+Sk muscle,Other
+Brain,Nervous
+Mucosa,Other
+Thyroid,Other
+Lymph nd,Immune
+Lungs,Respiratory
+Thymus,Immune
+Heart,Cardiovascular
+Kidney,Urinary
+Spleen,Immune
+Stomach,Digestive
+Skin,Other
+Intestine,Digestive
+Adipose,Other
+Prostate,Reproductive
+Bone,Other
+
