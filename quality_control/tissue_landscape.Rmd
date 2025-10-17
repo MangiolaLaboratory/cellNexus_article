@@ -1,3 +1,7 @@
+## Setup
+Load required packages and a shared ggplot theme used across figures.
+
+```{r setup, message=FALSE, warning=FALSE}
 library(cellNexus)
 library(dplyr)
 library(ggplot2)
@@ -8,13 +12,22 @@ library(ggsci)
 
 # Import theme_multipanel
 source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
+```
 
+## Load and prepare metadata
+Join the project-specific tissue labels and keep only records with a defined `tissue_label`.
+
+```{r load_metadata}
 my_metadata =
     get_metadata() |>
     left_join(readr::read_csv("tissue_groups_to_labels.csv"), copy = TRUE) |>
     filter(!is.na(tissue_label))
+```
 
+## Compute QC metrics
+Calculate all per-tissue QC summaries (proportions, counts, and pre-formatted labels for plotting).
 
+```{r compute_metrics}
 empty_droplet_proportion = 
     my_metadata |> 
     count(empty_droplet, tissue_label, sample_id, dataset_id) |>
@@ -39,7 +52,6 @@ doublet_proportion =
     summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_doublet = paste0(signif(mean_doublet_proportion * 100, 1), "%"))
-
 
 feature_count = 
     my_metadata |> 
@@ -112,8 +124,12 @@ missing_annotation_sex_proportion =
     select(tissue_label, proportion_missing_annotation_sex) |>
     collect() |>
     mutate(label_sex = paste0(signif(proportion_missing_annotation_sex * 100, 1), "%")) 
+```
 
+## Assemble wide QC table
+Combine all metric tables into a single wide table keyed by `tissue_label`.
 
+```{r assemble_qc_table}
 qc_table = 
     empty_droplet_proportion |> 
     left_join(dead_proportion) |> 
@@ -126,18 +142,13 @@ qc_table =
     left_join(missing_annotation_sex_proportion) |>
     left_join(dataset_size) |>
     filter(!is.na(tissue_label))
+```
 
+## Reshape for plotting and build figures
+Pivot the wide table to long format, attach labels, set facet/row ordering, and produce the bar and bubble plots.
+
+```{r reshape_long}
 # Reshape data to long format for visualization
-
-# Which columns have NA?
- qc_table_collected = qc_table |> collect()
-na_columns = colnames(qc_table_collected)[colSums(is.na(qc_table_collected)) > 0]
-print(na_columns)
-
-# source("tissue_color_utils.R")
-
-
-
 qc_table_values = 
   qc_table |> 
   select(tissue_label, mean_empty_proportion, mean_dead_proportion, mean_doublet_proportion, mean_feature_count, 
@@ -172,7 +183,7 @@ qc_table_long =
   mutate(label_metric = metric_to_label_map[metric]) |> 
   left_join(qc_table_labels, by = c("tissue_label", "label_metric")) |>
 
-  # abbreviate metrics names smartly, e.g. keeping empty, alive, doublet, feature_count, donor_count, cell_count, missing_annotation_ethnicity, missing_annotation_sex
+  # abbreviate metrics names smartly
   mutate(metric_label = case_when(
     metric == "mean_empty_proportion" ~ "Empty",
     metric == "mean_dead_proportion" ~ "Alive",
@@ -185,13 +196,13 @@ qc_table_long =
     metric == "n" ~ "Cells",
     metric == "dataset_size" ~ "Datasets",
   )) |>
-      mutate(metric_label = metric_label |> fct_relevel("Cells mean", "Donors", "Datasets", "Features", "Alive", "Empty", "Doublet", "Ethnicity", "Sex"))  |>
+  mutate(metric_label = metric_label |> fct_relevel("Cells mean", "Donors", "Datasets", "Features", "Alive", "Empty", "Doublet", "Ethnicity", "Sex"))  |>
 
-      # Donors count and dataset count should be log10 transformed
-      mutate(value = if_else(metric == "donor_count" | metric == "dataset_size", log10(value), value)) |>
+  # Donors/datasets to log10 for bar length; labels remain from precomputed columns
+  mutate(value = if_else(metric == "donor_count" | metric == "dataset_size", log10(value), value)) |>
 
-# mutate value to 0 if na
-mutate(value = if_else(is.na(value), 0, value)) |>  
+  # NA handling
+  mutate(value = if_else(is.na(value), 0, value)) |>
 
 # add ordering column based on donor count
 nest(data = -tissue_label)  |>
@@ -221,15 +232,15 @@ plot_barplots =
   ), size = 1) +
   scale_color_identity() +
   scale_fill_manual(values = c(
-    "Cells mean" = "#384E55",    # dark blue-gray
-    "Donors" = "#00A1D5",         # bright blue  
-    "Datasets" = "#79AE96",       # teal green
-    "Features" = "#DF8E42",       # orange
-    "Alive" = "#B34846",          # red
-    "Empty" = "#6A6599",          # purple
-    "Doublet" = "#8B7B6A",        # brown
-    "Ethnicity" = "#95C0B5",      # mint
-    "Sex" = "#D4A373"             # tan
+    "Cells mean" = "#384E55",
+    "Donors" = "#00A1D5",
+    "Datasets" = "#79AE96",
+    "Features" = "#DF8E42",
+    "Alive" = "#B34846",
+    "Empty" = "#6A6599",
+    "Doublet" = "#8B7B6A",
+    "Ethnicity" = "#95C0B5",
+    "Sex" = "#D4A373"
   )) +
   facet_grid(fct_reorder(macrocategory, ordering_macrocategory) ~ metric_label, scales = "free", space = "free_y") +
   theme_multipanel +
@@ -263,14 +274,20 @@ plot_n =
   ) +
   labs(y = "Tissue") 
 
-# patchwork the plots
+# Compose
 library(patchwork)
 plot_n + plot_barplots + plot_annotation(tag_levels = 'A') + 
 plot_layout(guides = 'collect', nrow = 1, widths = c(1.5, 8)) &
   theme(plot.margin = margin(0, 0, 0, 0, "pt"), legend.position = "bottom")
+```
 
+## Save figure
+Export the combined figure to `quality_control/tissue_landscape.pdf` for downstream use.
+
+```{r save_plot}
 # save within directory
 ggsave("quality_control/tissue_landscape.pdf", width = 70, height = 170, plot = last_plot(), units = "mm")
+```
 
 
 
