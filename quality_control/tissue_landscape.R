@@ -3,6 +3,8 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(forcats)
+library(purrr)
+library(ggsci)
 
 # Import theme_multipanel
 source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
@@ -16,48 +18,74 @@ my_metadata =
 empty_droplet_proportion = 
     my_metadata |> 
     count(empty_droplet, tissue_label, sample_id, dataset_id) |>
-    mutate(empty_proportion = n/sum(n)) |> 
-    summarise(mean_empty_proportion = mean(empty_proportion, na.rm = TRUE), .by=tissue_label)
+    mutate(empty_proportion = n/sum(n), .by = tissue_label) |> 
+    summarise(mean_empty_proportion = mean(empty_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_empty = paste0(signif(mean_empty_proportion * 100, 1), "%"))
 
 dead_proportion = 
     my_metadata |> 
     count(alive, tissue_label, sample_id, dataset_id) |> 
     mutate(alive = if_else(is.na(alive), FALSE, alive)) |> 
-    mutate(dead_proportion = n/sum(n)) |> 
-    summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label)
+    mutate(dead_proportion = n/sum(n), .by = tissue_label) |> 
+    summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_dead = paste0(signif(mean_dead_proportion * 100, 1), "%"))
 
 doublet_proportion = 
     my_metadata |> 
     count(scDblFinder.class, tissue_label, sample_id, dataset_id) |> 
-    mutate(doublet_proportion = n/sum(n)) |> 
-    summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label)
+    mutate(doublet_proportion = n/sum(n), .by = tissue_label) |> 
+    summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_doublet = paste0(signif(mean_doublet_proportion * 100, 1), "%"))
 
 
 feature_count = 
     my_metadata |> 
     summarise(mean_feature_count = mean(feature_count, na.rm = TRUE), .by=c(tissue_label, sample_id)) |> 
-    summarise(mean_feature_count = mean(mean_feature_count, na.rm = TRUE), .by=tissue_label)
+    summarise(mean_feature_count = mean(mean_feature_count, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_features = ifelse(mean_feature_count >= 1000, 
+                                     paste0(signif(mean_feature_count/1000, 1), "K"),
+                                     as.character(signif(mean_feature_count, 1))))
 
 donor_size = 
     my_metadata |> 
     distinct(tissue_label, donor_id) |> 
     count(tissue_label) |> 
-    rename(donor_count = n) 
+    rename(donor_count = n) |>
+    collect() |>
+    mutate(label_donors = ifelse(donor_count >= 1000,
+                                   paste0(signif(donor_count/1000, 1), "K"),
+                                   as.character(signif(donor_count, 1))))
 
 dataset_size = 
     my_metadata |> 
     distinct(tissue_label, dataset_id) |> 
     count(tissue_label) |> 
-    rename(dataset_size = n) 
+    rename(dataset_size = n) |>
+    collect() |>
+    mutate(label_datasets = ifelse(dataset_size >= 1000,
+                                     paste0(signif(dataset_size/1000, 1), "K"),
+                                     as.character(signif(dataset_size, 1))))
 
 cell_count_mean = 
     my_metadata |> 
     count(tissue_label, sample_id, dataset_id) |> 
-    summarise(mean_cell_count = mean(n, na.rm = TRUE), .by=tissue_label)
+    summarise(mean_cell_count = mean(n, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_cells_mean = ifelse(mean_cell_count >= 1000,
+                                       paste0(signif(mean_cell_count/1000, 1), "K"),
+                                       as.character(signif(mean_cell_count, 1))))
 
 cell_count = 
     my_metadata |> 
-    count(tissue_label)
+    count(tissue_label) |>
+    collect() |>
+    mutate(label_cells = ifelse(n >= 1000,
+                                  paste0(signif(n/1000, 1), "K"),
+                                  as.character(signif(n, 1))))
 
 missing_annotation_ethnicity_proportion = 
     my_metadata |> 
@@ -67,7 +95,9 @@ missing_annotation_ethnicity_proportion =
     pivot_wider(names_from = is_missing_annotation_ethnicity, values_from = n) |> 
     mutate(proportion_missing_annotation_ethnicity = `TRUE`/sum(`TRUE`, `FALSE`)) |> 
     mutate(proportion_missing_annotation_ethnicity = if_else(is.na(proportion_missing_annotation_ethnicity), 0, proportion_missing_annotation_ethnicity)) |> 
-    select(tissue_label, proportion_missing_annotation_ethnicity)
+    select(tissue_label, proportion_missing_annotation_ethnicity) |>
+    collect() |>
+    mutate(label_ethnicity = paste0(signif(proportion_missing_annotation_ethnicity * 100, 1), "%"))
 
 missing_annotation_sex_proportion = 
     my_metadata |> 
@@ -79,7 +109,9 @@ missing_annotation_sex_proportion =
   pivot_wider(names_from = is_missing_annotation_sex, values_from = n) |> 
   mutate(proportion_missing_annotation_sex = `TRUE`/sum(`TRUE`, `FALSE`)) |> 
   mutate(proportion_missing_annotation_sex = if_else(is.na(proportion_missing_annotation_sex), 0, proportion_missing_annotation_sex)) |> 
-    select(tissue_label, proportion_missing_annotation_sex) 
+    select(tissue_label, proportion_missing_annotation_sex) |>
+    collect() |>
+    mutate(label_sex = paste0(signif(proportion_missing_annotation_sex * 100, 1), "%")) 
 
 
 qc_table = 
@@ -106,16 +138,39 @@ print(na_columns)
 
 
 
-qc_table_long = 
+qc_table_values = 
   qc_table |> 
   select(tissue_label, mean_empty_proportion, mean_dead_proportion, mean_doublet_proportion, mean_feature_count, 
          donor_count, mean_cell_count, n, 
          proportion_missing_annotation_ethnicity, proportion_missing_annotation_sex, dataset_size) |> 
-  
-  # Drop NA tissue_label
   as_tibble() |> 
-  pivot_longer(cols = -tissue_label, names_to = "metric", values_to = "value") |>
- # mutate(tissue_label = get_tissue_abbrev(tissue_label)) |>
+  pivot_longer(cols = -tissue_label, names_to = "metric", values_to = "value")
+
+qc_table_labels = 
+  qc_table |> 
+  select(tissue_label, label_empty, label_dead, label_doublet, label_features,
+         label_donors, label_cells_mean, label_cells, label_ethnicity, label_sex, label_datasets) |> 
+  as_tibble() |> 
+  pivot_longer(cols = -tissue_label, names_to = "label_metric", values_to = "label")
+
+# Map metric names to label names
+metric_to_label_map = c(
+  "mean_empty_proportion" = "label_empty",
+  "mean_dead_proportion" = "label_dead",
+  "mean_doublet_proportion" = "label_doublet",
+  "mean_feature_count" = "label_features",
+  "donor_count" = "label_donors",
+  "mean_cell_count" = "label_cells_mean",
+  "n" = "label_cells",
+  "proportion_missing_annotation_ethnicity" = "label_ethnicity",
+  "proportion_missing_annotation_sex" = "label_sex",
+  "dataset_size" = "label_datasets"
+)
+
+qc_table_long = 
+  qc_table_values |> 
+  mutate(label_metric = metric_to_label_map[metric]) |> 
+  left_join(qc_table_labels, by = c("tissue_label", "label_metric")) |>
 
   # abbreviate metrics names smartly, e.g. keeping empty, alive, doublet, feature_count, donor_count, cell_count, missing_annotation_ethnicity, missing_annotation_sex
   mutate(metric_label = case_when(
@@ -130,28 +185,65 @@ qc_table_long =
     metric == "n" ~ "Cells",
     metric == "dataset_size" ~ "Datasets",
   )) |>
-      mutate(metric_label = metric_label |> fct_relevel("Cells mean", "Donors", "Datasets", "Features", "Alive", "Empty", "Doublet", "Ethnicity", "Sex")) 
+      mutate(metric_label = metric_label |> fct_relevel("Cells mean", "Donors", "Datasets", "Features", "Alive", "Empty", "Doublet", "Ethnicity", "Sex"))  |>
+
+      # Donors count and dataset count should be log10 transformed
+      mutate(value = if_else(metric == "donor_count" | metric == "dataset_size", log10(value), value)) |>
 
 # mutate value to 0 if na
-qc_table_long = qc_table_long |> mutate(value = if_else(is.na(value), 0, value))
+mutate(value = if_else(is.na(value), 0, value)) |>  
 
-# Create bar plots with metrics as columns and tissues as rows
-plot_barplots = qc_table_long |> 
-
-    filter(metric_label != "Cells") |>
+# add ordering column based on donor count
+nest(data = -tissue_label)  |>
+mutate(ordering = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
+unnest(data) |>
     left_join(readr::read_csv("tissue_labels_to_macrocategories.csv"), copy = TRUE) |>
     mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
-  ggplot(aes(x = value, y = tissue_label)) +
+
+    # order macrocategories by ordering column
+    nest(data = -macrocategory) |>
+    mutate(ordering_macrocategory = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
+    unnest(data) 
+  
+
+# Create bar plots with metrics as columns and tissues as rows
+plot_barplots = 
+   qc_table_long |> 
+  filter(metric_label != "Cells") |>
+  mutate(max_value = max(value, na.rm = TRUE), .by = metric_label) |>
+  mutate(threshold = max_value * 0.15) |>
+  ggplot(aes(x = value, y = fct_reorder(tissue_label, ordering, .desc = TRUE), fill = metric_label)) +
   geom_col() +
-  facet_grid(macrocategory ~ metric_label, scales = "free", space = "free_y") +
+  geom_text(aes(
+    label = label,  # Use pre-computed labels from tables
+    color = ifelse(value > threshold, "white", "black"),
+    hjust = ifelse(value > threshold, 1.1, -0.1)
+  ), size = 1) +
+  scale_color_identity() +
+  scale_fill_manual(values = c(
+    "Cells mean" = "#384E55",    # dark blue-gray
+    "Donors" = "#00A1D5",         # bright blue  
+    "Datasets" = "#79AE96",       # teal green
+    "Features" = "#DF8E42",       # orange
+    "Alive" = "#B34846",          # red
+    "Empty" = "#6A6599",          # purple
+    "Doublet" = "#8B7B6A",        # brown
+    "Ethnicity" = "#95C0B5",      # mint
+    "Sex" = "#D4A373"             # tan
+  )) +
+  facet_grid(fct_reorder(macrocategory, ordering_macrocategory) ~ metric_label, scales = "free", space = "free_y") +
   theme_multipanel +
   theme(
     strip.text = element_blank(),
     axis.text.y = element_blank(),
     axis.ticks.y = element_blank(),
-    axis.title.y = element_blank()
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_text(),
+    strip.text.x = element_text(angle = 90, vjust = 1, hjust = 1)
   ) +
-  labs(x = "Value") 
+  labs(x = "Value", fill = "Metric")
 
 # n should be a bubble plot that you patchwork with the other plots
 plot_n = 
@@ -159,9 +251,9 @@ plot_n =
   left_join(readr::read_csv("tissue_labels_to_macrocategories.csv"), copy = TRUE) |>
   mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
   filter(metric == "n") |> 
-  ggplot(aes(x = 1, y = tissue_label)) +
+  ggplot(aes(x = 1, y = fct_reorder(tissue_label, ordering, .desc = TRUE))) +
   geom_point(aes(size = value)) +
-  facet_grid(macrocategory ~ metric_label, scales = "free", space = "free_y") +
+  facet_grid(fct_reorder(macrocategory, ordering_macrocategory) ~ metric_label, scales = "free", space = "free_y") +
   theme_multipanel +
   theme(
     strip.text.y = element_blank(),
@@ -173,8 +265,12 @@ plot_n =
 
 # patchwork the plots
 library(patchwork)
-plot_n + plot_barplots + plot_annotation(tag_levels = 'A') + plot_layout(guides = 'collect', nrow = 1, widths = c(1, 8)) &
+plot_n + plot_barplots + plot_annotation(tag_levels = 'A') + 
+plot_layout(guides = 'collect', nrow = 1, widths = c(1.5, 8)) &
   theme(plot.margin = margin(0, 0, 0, 0, "pt"), legend.position = "bottom")
 
 # save within directory
-ggsave("quality_control/tissue_landscape.pdf", width = 14, height = 10, plot = last_plot())
+ggsave("quality_control/tissue_landscape.pdf", width = 70, height = 170, plot = last_plot(), units = "mm")
+
+
+
