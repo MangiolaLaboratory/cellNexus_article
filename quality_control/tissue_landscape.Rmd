@@ -2,6 +2,28 @@
 Load required packages and a shared ggplot theme used across figures.
 
 ```{r setup, message=FALSE, warning=FALSE}
+
+rlang::check_installed(
+  pkg = c(
+  "cellNexus",
+  "dplyr",
+  "ggplot2",
+  "tidyr",
+  "forcats",
+  "purrr",
+  "ggsci",
+  "here",
+  "readr",
+  "patchwork"
+),
+  action = function(...) {
+    if (!requireNamespace("BiocManager", quietly = TRUE)) {
+      install.packages("BiocManager", repos = c("https://cloud.r-project.org"))
+    }
+    BiocManager::install(..., ask = FALSE, update = FALSE)
+  }
+)
+
 library(cellNexus)
 library(dplyr)
 library(ggplot2)
@@ -9,6 +31,7 @@ library(tidyr)
 library(forcats)
 library(purrr)
 library(ggsci)
+library(here)
 
 # Import theme_multipanel
 source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
@@ -20,7 +43,7 @@ Join the project-specific tissue labels and keep only records with a defined `ti
 ```{r load_metadata}
 my_metadata =
     get_metadata() |>
-    left_join(readr::read_csv("tissue_groups_to_labels.csv"), copy = TRUE) |>
+    left_join(readr::read_csv(here("tissue_groups_to_labels.csv")), copy = TRUE) |>
     filter(!is.na(tissue_label))
 ```
 
@@ -31,7 +54,8 @@ Calculate all per-tissue QC summaries (proportions, counts, and pre-formatted la
 empty_droplet_proportion = 
     my_metadata |> 
     count(empty_droplet, tissue_label, sample_id, dataset_id) |>
-    mutate(empty_proportion = n/sum(n), .by = tissue_label) |> 
+    mutate(empty_proportion = n/sum(n), .by = sample_id) |> 
+    filter(empty_droplet) |> 
     summarise(mean_empty_proportion = mean(empty_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_empty = paste0(signif(mean_empty_proportion * 100, 1), "%"))
@@ -40,7 +64,8 @@ dead_proportion =
     my_metadata |> 
     count(alive, tissue_label, sample_id, dataset_id) |> 
     mutate(alive = if_else(is.na(alive), FALSE, alive)) |> 
-    mutate(dead_proportion = n/sum(n), .by = tissue_label) |> 
+      mutate(dead_proportion = n/sum(n), .by = sample_id) |> 
+  filter(!alive) |> 
     summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_dead = paste0(signif(mean_dead_proportion * 100, 1), "%"))
@@ -48,7 +73,8 @@ dead_proportion =
 doublet_proportion = 
     my_metadata |> 
     count(scDblFinder.class, tissue_label, sample_id, dataset_id) |> 
-    mutate(doublet_proportion = n/sum(n), .by = tissue_label) |> 
+    mutate(doublet_proportion = n/sum(n), .by = sample_id) |> 
+    filter(scDblFinder.class == "doublet") |> 
     summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_doublet = paste0(signif(mean_doublet_proportion * 100, 1), "%"))
@@ -101,11 +127,13 @@ cell_count =
 
 missing_annotation_ethnicity_proportion = 
     my_metadata |> 
+    filter(age_days >= 365) |> 
+    filter(!grepl("fetal|embryo|placenta|cord blood", tolower(tissue), ignore.case = TRUE)) |> 
     mutate(is_missing_annotation_ethnicity = self_reported_ethnicity == "unknown") |> 
     distinct(donor_id, tissue_label, is_missing_annotation_ethnicity) |> 
     count(tissue_label, is_missing_annotation_ethnicity) |> 
     pivot_wider(names_from = is_missing_annotation_ethnicity, values_from = n) |> 
-    mutate(proportion_missing_annotation_ethnicity = `TRUE`/sum(`TRUE`, `FALSE`)) |> 
+    mutate(proportion_missing_annotation_ethnicity = `TRUE`/(`TRUE` + `FALSE`)) |> 
     mutate(proportion_missing_annotation_ethnicity = if_else(is.na(proportion_missing_annotation_ethnicity), 0, proportion_missing_annotation_ethnicity)) |> 
     select(tissue_label, proportion_missing_annotation_ethnicity) |>
     collect() |>
@@ -114,13 +142,13 @@ missing_annotation_ethnicity_proportion =
 missing_annotation_sex_proportion = 
     my_metadata |> 
   filter(age_days >= 365) |> 
-  filter(!grepl("fetal|embryo|placenta|cord blood", tolower(title), ignore.case = TRUE)) |> 
+  filter(!grepl("fetal|embryo|placenta|cord blood", tolower(tissue), ignore.case = TRUE)) |> 
   mutate(is_missing_annotation_sex = sex == "unknown" | is.na(sex)) |> 
   distinct(donor_id, tissue_label, is_missing_annotation_sex) |> 
   count(tissue_label, is_missing_annotation_sex) |> 
   pivot_wider(names_from = is_missing_annotation_sex, values_from = n) |> 
-  mutate(proportion_missing_annotation_sex = `TRUE`/sum(`TRUE`, `FALSE`)) |> 
-  mutate(proportion_missing_annotation_sex = if_else(is.na(proportion_missing_annotation_sex), 0, proportion_missing_annotation_sex)) |> 
+  mutate(proportion_missing_annotation_sex = `TRUE`/(`TRUE` + `FALSE`)) |> 
+   mutate(proportion_missing_annotation_sex = if_else(is.na(proportion_missing_annotation_sex), 0, proportion_missing_annotation_sex)) |> 
     select(tissue_label, proportion_missing_annotation_sex) |>
     collect() |>
     mutate(label_sex = paste0(signif(proportion_missing_annotation_sex * 100, 1), "%")) 
@@ -194,7 +222,7 @@ qc_table_long =
     metric == "proportion_missing_annotation_ethnicity" ~ "Ethnicity",
     metric == "proportion_missing_annotation_sex" ~ "Sex",
     metric == "n" ~ "Cells",
-    metric == "dataset_size" ~ "Datasets",
+    metric == "dataset_size" ~ "Datasets"
   )) |>
   mutate(metric_label = metric_label |> fct_relevel("Cells mean", "Donors", "Datasets", "Features", "Alive", "Empty", "Doublet", "Ethnicity", "Sex"))  |>
 
@@ -208,7 +236,7 @@ qc_table_long =
 nest(data = -tissue_label)  |>
 mutate(ordering = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
 unnest(data) |>
-    left_join(readr::read_csv("tissue_labels_to_macrocategories.csv"), copy = TRUE) |>
+    left_join(readr::read_csv(here("tissue_labels_to_macrocategories.csv")), copy = TRUE) |>
     mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
 
     # order macrocategories by ordering column
@@ -259,7 +287,7 @@ plot_barplots =
 # n should be a bubble plot that you patchwork with the other plots
 plot_n = 
   qc_table_long |> 
-  left_join(readr::read_csv("tissue_labels_to_macrocategories.csv"), copy = TRUE) |>
+  left_join(readr::read_csv(here("tissue_labels_to_macrocategories.csv")), copy = TRUE) |>
   mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
   filter(metric == "n") |> 
   ggplot(aes(x = 1, y = fct_reorder(tissue_label, ordering, .desc = TRUE))) +
@@ -286,7 +314,7 @@ Export the combined figure to `quality_control/tissue_landscape.pdf` for downstr
 
 ```{r save_plot}
 # save within directory
-ggsave("quality_control/tissue_landscape.pdf", width = 70, height = 170, plot = last_plot(), units = "mm")
+ggsave(here("quality_control", "tissue_landscape.pdf"), width = 70, height = 170, plot = last_plot(), units = "mm")
 ```
 
 
