@@ -21,50 +21,137 @@ knitr:
 This report provides an overview of doublet differential expression analysis from cellNexus. It outlines the workflow steps, including data filtering, pseudobulk aggregation, quality control, dispersion estimation, DE analysis, and visualization.
 
 ```{r setup}
-library(ggalluvial)
-library(stringr)
-library(ggfittext)
-library(dplyr)
-library(purrr)
-library(targets)
-library(ggplot2)
-library(SummarizedExperiment)
-library(SingleCellExperiment)
-library(hrbrthemes)
-library(viridis)
-library(packcircles)
-library(ggrepel)
-library(patchwork)
-library(cellNexus)
-library(tidySingleCellExperiment)
-library(tidybulk)
-library(edgeR)
-library(tidySummarizedExperiment)
-library(tidyr)
-source("/Users/shen.m/projects/cellNexus/preprint/plot_custom_theme.R")
-source("/Users/shen.m/projects/cellNexus/preprint/CAQ_age_analysis_functions.R")
+.libPaths("/Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library")
+
+required_packages <- c(
+  "ggalluvial",
+  "stringr",
+  "ggfittext",
+  "dplyr",
+  "purrr",
+  "ggplot2",
+  "SummarizedExperiment",
+  "SingleCellExperiment",
+  "viridis",
+  "packcircles",
+  "ggrepel",
+  "patchwork",
+  "cellNexus",
+  "tidySingleCellExperiment",
+  "tidybulk",
+  "edgeR",
+  "tidySummarizedExperiment",
+  "tidyr"
+)
+
+# Ensure rlang is present
+if (!requireNamespace("rlang", quietly = TRUE)) {
+  install.packages("rlang")
+}
+
+# Helper to check and install Bioc packages if missing
+
+lapply(required_packages, function(pkg) {
+  if (!rlang::is_installed(pkg)) {
+    message(sprintf("Attempting to install missing package: %s", pkg))
+    if (!requireNamespace("BiocManager", quietly = TRUE)) {
+      install.packages("BiocManager")
+    }
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+    library(pkg, character.only = TRUE)
+  }
+})
+source(here::here("doublet_DE", "plot_custom_theme.R"))
+source(here::here("doublet_DE", "CAQ_age_analysis_functions.R"))
 ```
 
 # Load and process data
 ```{r}
-cell_metadata <- get_metadata(get_metadata_url(databases = "metadata.1.0.12.parquet"))
-age_groups_tbl = cell_metadata |> distinct(sample_id, age_days, sex) |> 
-  mutate(sex = ifelse(is.na(sex), "unknown", sex)) |> as_tibble() |>
-  mutate(age_groups = coarse_age_bin(age_days, sex),
-         age_groups_fine= age_bin(age_days, sex))
+library(tidyverse)
 
-cell_metadata = cell_metadata |> 
-  mutate(tissue_groups = ifelse(tissue %in% c("nose skin", "scalp"),
-                                "integumentary system (skin)",
-                                tissue_groups),
-         age_years = age_days/365.25,
-         sex = ifelse(is.na(sex), "unknown", sex),
-         scaled_nCount_RNA = log(nCount_RNA)) |> 
-  left_join(ethnicity_grouped, copy=T ) |> 
-  left_join(disease_data_grouped, copy=T) |>
-  left_join(disease_data_grouped_coarse, copy = T) |>
-  left_join(age_groups_tbl, copy = T) |> 
-  left_join(shorten_technology_label, copy = T)
+
+
+library(targets)
+tar_script({  
+
+  get_my_metadata <- function() {
+    get_metadata() |> 
+      filter(
+          empty_droplet == FALSE,
+          alive == TRUE,
+          feature_count >= 8000
+      ) |>
+      mutate(scDblFinder.class %in% c("singlet", "doublet"))
+  }
+
+  list(
+    tar_target(
+      my_sample_id,
+      get_my_metadata() |>
+      count(sample_id, dataset_id, scDblFinder.class) |>
+      mutate(doublet_proportion = n/sum(n), .by = sample_id) |>
+      filter(scDblFinder.class == "doublet") |>
+      filter(doublet_proportion > 0.05) |>
+
+      # get datasets with most samples
+      collect() |>
+      nest(data = -dataset_id) |>
+      mutate(n_samples = map_int(data, ~ n_distinct(.x$sample_id))) |>
+      arrange(desc(n_samples)) |>
+      filter(n_samples >= 10) |>
+      unnest(data) |>
+      pull(sample_id) |>
+      unique() |>
+      head(2),
+        # TEMPORARY
+        # _[1:2],
+        packages = c("cellNexus", "dplyr", "tidyr", "purrr")
+    ),
+    tar_target(
+      sample_aggregated,
+      {
+      sce <- 
+      get_my_metadata() |>
+        filter(sample_id == my_sample_id) |>
+        get_single_cell_experiment() # cache_directory = "~/scratch/cellNexus"
+
+      sce |>
+        scuttle::aggregateAcrossCells(
+          colData(sce)[,c("sample_id","scDblFinder.class")] |> 
+            as_tibble(rownames = ".cell") |>
+            mutate(aggregated_cells = paste(sample_id,scDblFinder.class, sep = "___")) |>
+            pull(aggregated_cells),
+          BPPARAM = BiocParallel::MulticoreParam(
+            workers = parallelly::availableCores(), 
+            progressbar = T
+          )
+        ) 
+        },
+        pattern = map(my_sample_id), 
+        packages = c("cellNexus", "scuttle", "dplyr", "BiocParallel")
+    ),
+
+    # Get shared genes across all samples
+    tar_target(
+      genes_list,
+      sample_aggregated |> rownames(),
+        packages = c("SummarizedExperiment", "dplyr", "tidyr"),
+        pattern = map(sample_aggregated)
+    ),
+    tar_target( shared_genes,  genes_list |>  unique() ),
+    tar_target( sample_aggregated_filtered,
+      sample_aggregated[rownames(sample_aggregated) %in% shared_genes,] |>
+        as("SummarizedExperiment") |>
+        list(),
+      packages = c("SummarizedExperiment", "dplyr", "tidyr", "tidySingleCellExperiment", "purrr"),
+      pattern = map(sample_aggregated)
+    ),
+    tar_target( se, sample_aggregated_filtered |> do.call(cbind, args=_) )
+  )
+}, ask = FALSE, script = here::here("doublet_DE", "_targets.R"))
+tar_make(script = here::here("doublet_DE", "_targets.R"))
+
+tar_read(sample_aggregated_filtered)[[1]]
 ```
 
 
@@ -118,7 +205,7 @@ pseudobulk <- scuttle::aggregateAcrossCells(
 
 ```{r echo=FALSE}
 # Optionally, load from HDF5 if available
-pseudobulk = HDF5Array::loadHDF5SummarizedExperiment("~/projects/cellNexus/preprint/data/doublet_de_1_0_12/")
+pseudobulk = HDF5Array::loadHDF5SummarizedExperiment("doublet_de_1_0_12/")
 
 ```
 
@@ -225,6 +312,8 @@ x |> left_join(samples_celtype_single_doublet_tbl |>
 This section performs quality control and normalization on the pseudobulk data. Outlier counts are capped at the 99th percentile per sample, and normalization (e.g., TMM) is applied. It visualizes the distribution of raw and normalized counts to assess the effect of normalization.
 
 ```{r}
+library(tidybulk)
+
 se = pseudobulk |>
   as("SummarizedExperiment")
 rownames(se) <- rowData(pseudobulk) |> rownames()
@@ -317,15 +406,20 @@ We selected a minimum CPM threshold of 30 for the differential expression analys
 This section performs differential expression analysis between doublet and singlet pseudobulk samples, adjusting for cell type and dataset. The section identifies significantly differentially expressed genes and extracts the top genes for further visualization.
 
 ```{r}
-se_filtered = se |> keep_abundant(minimum_count_per_million = 30) |> scale_abundance()
-
-tbl = se_filtered |> 
+library(stringr)
+library(tidyprint)
+library(tidySummarizedExperiment)
+tbl =
+  se |> 
+  keep_abundant(minimum_count_per_million = 30) |> 
+  scale_abundance() |> 
   mutate(scDblFinder.class = factor(scDblFinder.class, levels = c("singlet", "doublet"))) |>
   mutate(cell_type_unified_ensemble_fixed = str_replace_all(cell_type_unified_ensemble, "[ /]", "_"),
          dataset_id_fixed = str_replace_all(dataset_id, "-", "_")) |> 
-  test_differential_abundance(
+  test_differential_expression(
     .formula = ~ cell_type_unified_ensemble_fixed + dataset_id_fixed + scDblFinder.class,
-    .contrasts = c("scDblFinder.classdoublet"),
+    .contrasts = c("scDblFinder.classdoublet"), 
+    method = "edger_robust_likelihood_ratio",
     omit_contrast_in_colnames = TRUE
   ) |> 
   mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
@@ -333,7 +427,7 @@ tbl = se_filtered |>
                                         keytype = "ENSEMBL", 
                                         column="SYMBOL", 
                                         multiVals = "first")) |> 
-  distinct(.feature, symbol, logFC, logCPM, F, PValue, FDR, .feature) |> 
+  distinct(.feature, symbol, logFC, logCPM, PValue, FDR, .feature) |> 
   as_tibble() 
 ```
 
