@@ -1,0 +1,873 @@
+---
+title: "Tissue Landscape Quality Control"
+format: html
+editor: visual
+---
+
+## Setup
+
+Load required packages and a shared ggplot theme used across figures.
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+# Install BiocManager if not available
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager", repos = "https://cloud.r-project.org", lib = .libPaths())
+}
+
+# Function to check and install packages
+check_and_install <- function(packages) {
+  for (pkg in packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      BiocManager::install(pkg, ask = FALSE, update = FALSE, lib = .libPaths())
+    }
+  }
+}
+
+# Define packages (BiocManager can handle both CRAN and GitHub)
+required_packages <- c(
+  "MangiolaLaboratory/cellNexus",  # GitHub package
+  "dplyr", "ggplot2", "tidyr", 
+  "forcats", "purrr", "ggsci", "here", "readr", "patchwork"
+)
+
+check_and_install(required_packages)
+
+# Load packages
+library(cellNexus)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+library(purrr)
+library(ggsci)
+library(here)
+library(readr)
+library(patchwork)
+library(tibble)
+library(duckdb)
+library(glue)
+library(tidybulk)
+library(cellNexus)
+# Import theme_multipanel
+source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
+```
+
+
+```{r}
+ edit_covariates = function(tbl){
+      
+      tissue_grouped = list(
+        
+        # Respiratory System
+        "respiratory system" = c(
+          "lung", "lung parenchyma", "alveolus of lung",  "bronchus",
+          "respiratory airway", "pleura", "pleural effusion", "middle lobe of right lung",
+          "upper lobe of left lung", "lower lobe of left lung", "upper lobe of right lung",
+          "lower lobe of right lung", "lingula of left lung", "right lung", "left lung"
+        ),
+        
+        "trachea" = c( "epithelium of trachea", "trachea"),
+        
+        # Cardiovascular System
+        "cardiovascular system" = c(
+          "heart", "heart left ventricle", "heart right ventricle", "cardiac ventricle",
+          "cardiac atrium", "right cardiac atrium", "left cardiac atrium", "apex of heart",
+          "aorta", "coronary artery", 
+          "venous blood", "anterior wall of left ventricle", "myocardium", "interventricular septum", "ventricular tissue", "basal zone of heart"
+        ),
+        
+        "vasculature" = c("kidney blood vessel", "artery", "vein", "vasculature", "mesenteric artery"),
+        
+        # Umbilical Cord Blood
+        "umbilical cord blood" = "umbilical cord blood",
+        
+        # Oesophagus
+        "oesophagus" = c(
+          "esophagus", "lower esophagus", "esophagus muscularis mucosa",
+          "submucosal esophageal gland",
+          
+          # Epithelium
+          "epithelium of esophagus"
+        ),
+        
+        # Stomach
+        "stomach" = c(
+          "stomach", "body of stomach", "cardia of stomach"
+        ),
+        
+        # Small Intestine
+        "small intestine" = c(
+          "small intestine", "duodenum", "jejunum", "ileum",
+          
+          # Epithelium
+          "epithelium of small intestine", "jejunal epithelium", "ileal epithelium",
+          "submucosa of ileum", "lamina propria of small intestine"
+        ),
+        
+        # Large Intestine
+        "large intestine" = c(
+          "large intestine", "colon", "left colon", "right colon",
+          "sigmoid colon", "descending colon", "transverse colon",
+          "ascending colon", "hepatic flexure of colon", "caecum",
+          "rectum", "appendix", "vermiform appendix",
+          
+          # epithelium
+          "colonic epithelium", "submucosa of ascending colon", "lamina propria of large intestine",
+          "mucosa of colon", "lamina propria of mucosa of colon", "caecum epithelium"
+        ),
+        
+        # Digestive System (General)
+        "digestive system (general)" = c(
+          "intestine", "hindgut", "lamina propria", "mucosa"
+        ),
+        
+        # Nasal, Oral, and Pharyngeal Regions
+        "nasal, oral, and pharyngeal regions" = c(
+          "nasal cavity", "nasopharynx", "oral mucosa", "tongue", "anterior part of tongue",
+          "posterior part of tongue", "gingiva", "nose", "saliva"
+        ),
+        
+        # Cerebral Lobes and Cortical Areas
+        "cerebral lobes and cortical areas" = c(
+          "frontal lobe", "left frontal lobe", "right frontal lobe", "primary motor cortex",
+          "dorsolateral prefrontal cortex", "superior frontal gyrus", "orbitofrontal cortex",
+          "medial orbital frontal cortex", "Broca's area", "prefrontal cortex",
+          "temporal lobe", "left temporal lobe", "right temporal lobe", 
+          "angular gyrus", "entorhinal cortex",
+          "parietal lobe", "left parietal lobe", "right parietal lobe", "primary somatosensory cortex",
+          "occipital lobe", "right occipital lobe", "primary visual cortex",
+          "occipital cortex", "insular cortex", "parietal cortex", "temporal cortex",
+          "frontal cortex", "Brodmann (1909) area 4", "temporoparietal junction",
+          "middle temporal gyrus", "cingulate cortex", "brain", "brain white matter", "cerebral cortex", "cerebral nuclei"
+        ),
+        
+        # Limbic and Basal Systems
+        "limbic and basal systems" = c(
+          "anterior cingulate cortex", "anterior cingulate gyrus", "hippocampal formation",
+          "hypothalamus", "thalamic complex", "dentate nucleus", "basal ganglion",
+          "caudate nucleus", "putamen", "substantia nigra pars compacta",
+          "lateral ganglionic eminence", "medial ganglionic eminence",
+          "caudal ganglionic eminence", "ganglionic eminence"
+        ),
+        
+        # Brainstem and Cerebellar Structures
+        "brainstem and cerebellar structures" = c(
+          "pons", "midbrain", "myelencephalon", "telencephalon", "forebrain",
+          "cerebellum", "cerebellum vermis lobule", "cerebellar cortex",
+          "hemisphere part of cerebellar posterior lobe", "white matter of cerebellum"
+        ),
+        
+        # General Brain and Major Structures
+        "general brain and major structures" = c(
+          "spinal cord", "neural tube", "cervical spinal cord white matter"
+        ),
+        
+        # Muscular System (Skeletal Muscles)
+        "muscular system (skeletal muscles)" = c(
+          "rectus abdominis muscle", "gastrocnemius", "muscle of abdomen", "muscle organ",
+          "muscle tissue", "pelvic diaphragm muscle", "skeletal muscle tissue", "muscle of pelvic diaphragm"
+        ),
+        
+        # Connective Tissue
+        "connective tissue" = c(
+          "connective tissue", "tendon of semitendinosus", "vault of skull", "bone spine",
+          "rib"
+        ),
+        
+        # Adipose Tissue
+        "adipose tissue" = c(
+          "adipose tissue", "subcutaneous adipose tissue", "visceral abdominal adipose tissue",
+          "perirenal fat", "omental fat pad", "subcutaneous abdominal adipose tissue",
+          "abdominal adipose tissue"
+        ),
+        
+        # Endocrine System
+        "endocrine system" = c(
+          "thyroid gland", "adrenal tissue", "adrenal gland", "islet of Langerhans",
+          "endocrine pancreas", "pineal gland"
+        ),
+        
+        # Lymphatic System
+        "lymphatic system" = c(
+          "lymph node", "mesenteric lymph node", "thoracic lymph node",
+          "cervical lymph node", "bronchopulmonary lymph node", "tonsil", "inguinal lymph node"
+        ),
+        
+        # Integumentary System (Skin)
+        "integumentary system (skin)" = c(
+          "skin of abdomen", "skin of forearm", "skin of scalp", "skin of face", "skin of leg",
+          "skin of chest", "skin of back", "skin of hip", "skin of body", "skin of cheek",
+          "skin of temple", "skin of shoulder", "skin of external ear", "skin of trunk",
+          "skin of prepuce of penis", "skin epidermis", "arm skin", "lower leg skin",
+          "hindlimb skin", "zone of skin", "dermis", "skin of nose", "skin of forehead",
+          "skin of pes", "axilla"
+        ),
+        
+        # Gastrointestinal Accessory Organs
+        "gallbladder" =  "gallbladder",
+        
+        # Gastrointestinal Accessory Organs
+        "pancreas" = c( "pancreas", "exocrine pancreas" ),
+        
+        # Gastrointestinal Accessory Organs
+        "liver" = c( "liver", "caudate lobe of liver", "hepatic cecum" ),
+        
+        # Spleen
+        "spleen" = "spleen",
+        
+        # Thymus
+        "thymus" = "thymus",
+        
+        # Blood
+        "blood" = "blood",
+        
+        # Bone Marrow
+        "bone marrow" = "bone marrow",
+        
+        # Female Reproductive System
+        "female reproductive system" = c(
+          "uterus", "myometrium", "fallopian tube", "ampulla of uterine tube",
+          "fimbria of uterine tube", "uterine cervix", "endometrium",
+          "decidua", "decidua basalis", "placenta", "yolk sac", "isthmus of fallopian tube"
+        ),
+        "ovary" = "ovary", 
+        
+        # Male Reproductive System
+        "male reproductive system (other)" = c(
+          "testis", "gonad"
+        ),
+        
+        # Prostate
+        "prostate" = c(
+          "prostate gland", "transition zone of prostate", "peripheral zone of prostate"
+        ),
+        
+        # Renal System
+        "renal system" = c(
+          "kidney", "cortex of kidney", "renal medulla", "renal papilla",
+          "renal pelvis", "ureter", "bladder organ"
+        ),
+        
+        # Miscellaneous Glands
+        "miscellaneous glands" = c(
+          "parotid gland", "lacrimal gland", "sublingual gland", "mammary gland",
+          "chorionic villus"
+        ),
+        
+        # Eye and Visual-Related Structures
+        "sensory-related structures" = c(
+          "retina",
+          "retinal neural layer",
+          "macula lutea",
+          "macula lutea proper",
+          "sclera",
+          "trabecular meshwork",
+          "conjunctiva",
+          "pigment epithelium of eye",
+          "cornea",
+          "iris",
+          "ciliary body",
+          "peripheral region of retina",
+          "eye trabecular meshwork",
+          "perifoveal part of retina",
+          "choroid plexus",
+          "lens of camera-type eye",
+          "corneo-scleral junction",
+          "fovea centralis",
+          "eye",
+          "inner ear",
+          "vestibular system",
+          "primary auditory cortex"
+        ),
+        
+        # Digestive Tract Junctions and Connections
+        "digestive tract junctions and connections" = c(
+          "esophagogastric junction", "duodeno-jejunal junction", "hepatopancreatic ampulla",
+          "hepatopancreatic duct", "pyloric antrum"
+        ),
+        
+        # Peritoneal and Abdominal Cavity Structures
+        "peritoneal and abdominal cavity structures" = c(
+          "peritoneum", "omentum", "retroperitoneum", "mesentery"
+        ),
+        
+        # Breast
+        "breast" = c(
+          "breast", "upper outer quadrant of breast"
+        )
+      ) |> 
+        enframe(name ="tissue_groups") |> 
+        distinct() |> 
+        unnest(value) |> 
+        rename(tissue = value) 
+      
+      ethnicity_grouped <- tribble(
+        ~self_reported_ethnicity, ~ethnicity_groups,
+        "unknown", "Other/Unknown",
+        "European", "European",
+        "Korean", "East Asian",
+        "Asian", "East Asian",
+        "Japanese", "Japanese",
+        "African American", "African",
+        "Hispanic or Latin American", "Hispanic/Latin American",
+        "Singaporean Chinese", "East Asian",
+        "Han Chinese", "East Asian",
+        "Singaporean Indian", "South Asian",
+        "Singaporean Malay", "Other/Unknown",
+        "British", "European",
+        "African", "African",
+        "South Asian", "South Asian",
+        "European American", "European",
+        "East Asian", "East Asian",
+        "American", "Other/Unknown",
+        "African American or Afro-Caribbean", "African",
+        "Oceanian", "Native American & Pacific Islander",
+        "Jewish Israeli", "Middle Eastern & North African",
+        "Chinese", "East Asian",
+        "South East Asian", "Other/Unknown",
+        "Greater Middle Eastern  (Middle Eastern or North African or Persian)", "Middle Eastern & North African",
+        "Native American", "Native American & Pacific Islander",
+        "Pacific Islander", "Native American & Pacific Islander",
+        "Finnish", "European",
+        "Bangladeshi", "South Asian",
+        "Native American,Hispanic or Latin American", "Hispanic/Latin American",
+        "Irish", "European",
+        "Iraqi", "Middle Eastern & North African",
+        "European,Asian", "European"
+      )
+      
+      assay_data_grouped <- tribble(
+        ~assay, ~assay_groups,
+        "10x 3' v2", "10x Genomics 3",
+        "10x 3' v3", "10x Genomics 3",
+        "10x 5' v2", "10x Genomics 5",
+        "10x 5' v1", "10x Genomics 5",
+        "MARS-seq", "Plate based Technologies",
+        "10x 3' transcription profiling", "10x Genomics 3",
+        "10x 5' transcription profiling", "10x Genomics 5",
+        "Smart-seq2", "Smart seq",
+        "microwell-seq", "Microwell Technologies",
+        "TruDrop", "TruDrop",
+        "Drop-seq", "Drop based Technologies",
+        "Seq-Well S3", "Microwell Technologies",
+        "GEXSCOPE technology", "Other Technologies",
+        "Seq-Well", "Microwell Technologies",
+        "sci-RNA-seq", "Other Technologies",
+        "10x 3' v1", "10x Genomics 3",
+        "BD Rhapsody Whole Transcriptome Analysis", "Other Technologies",
+        "BD Rhapsody Targeted mRNA", "Other Technologies",
+        "CEL-seq2", "Plate based Technologies",
+        "SPLiT-seq", "Other Technologies",
+        "STRT-seq", "Plate based Technologies",
+        "inDrop", "Drop based Technologies",
+        "Smart-seq v4", "Smart seq",
+        "ScaleBio single cell RNA sequencing", "Other Technologies"
+      )
+      
+      
+      disease_data_grouped <- tribble(
+        ~disease, ~disease_groups,
+        
+        # Normal control
+        "normal", "Normal",
+        
+        # Isolated Diseases
+        "COVID-19", "COVID-19 related",
+        "post-COVID-19 disorder", "COVID-19 related",
+        "long COVID-19", "COVID-19 related",
+        "glioblastoma", "Glioblastoma",
+        "lung adenocarcinoma", "Lung Adenocarcinoma",
+        "systemic lupus erythematosus", "Systemic Lupus Erythematosus",
+        
+        # Infectious and Immune-related Diseases (other than COVID-19)
+        "Crohn disease", "Infectious and Immune-related Diseases",
+        "Crohn ileitis", "Infectious and Immune-related Diseases",
+        "pneumonia", "Infectious and Immune-related Diseases",
+        "common variable immunodeficiency", "Infectious and Immune-related Diseases",
+        "toxoplasmosis", "Infectious and Immune-related Diseases",
+        "Plasmodium malariae malaria", "Infectious and Immune-related Diseases",
+        "type 1 diabetes mellitus", "Infectious and Immune-related Diseases",
+        "influenza", "Infectious and Immune-related Diseases",
+        "chronic rhinitis", "Infectious and Immune-related Diseases",
+        "periodontitis", "Infectious and Immune-related Diseases",
+        "localized scleroderma", "Infectious and Immune-related Diseases",
+        "lymphangioleiomyomatosis", "Infectious and Immune-related Diseases",
+        "listeriosis", "Infectious and Immune-related Diseases",
+        
+        # Cancer (other than isolated cancers)
+        "squamous cell lung carcinoma", "Cancer",
+        "small cell lung carcinoma", "Cancer",
+        "non-small cell lung carcinoma", "Cancer",
+        "breast carcinoma", "Cancer",
+        "breast cancer", "Cancer",
+        "luminal B breast carcinoma", "Cancer",
+        "luminal A breast carcinoma", "Cancer",
+        "triple-negative breast carcinoma", "Cancer",
+        "gastric cancer", "Cancer",
+        "colorectal cancer", "Cancer",
+        "colon sessile serrated adenoma/polyp", "Cancer",
+        "follicular lymphoma", "Cancer",
+        "B-cell acute lymphoblastic leukemia", "Cancer",
+        "B-cell non-Hodgkin lymphoma", "Cancer",
+        "acute myeloid leukemia", "Cancer",
+        "acute promyelocytic leukemia", "Cancer",
+        "plasma cell myeloma", "Cancer",
+        "clear cell renal carcinoma", "Cancer",
+        "nonpapillary renal cell carcinoma", "Cancer",
+        "basal cell carcinoma", "Cancer",
+        "colorectal neoplasm", "Cancer",
+        "adenocarcinoma", "Cancer",
+        "chromophobe renal cell carcinoma", "Cancer",
+        "neuroendocrine carcinoma", "Cancer",
+        "lung large cell carcinoma", "Cancer",
+        "tongue cancer", "Cancer",
+        "Wilms tumor", "Cancer",
+        "pleomorphic carcinoma", "Cancer",
+        "blastoma", "Cancer",
+        
+        # Neurodegenerative and Neurological Disorders
+        "dementia", "Neurodegenerative and Neurological Disorders",
+        "Alzheimer disease", "Neurodegenerative and Neurological Disorders",
+        "Parkinson disease", "Neurodegenerative and Neurological Disorders",
+        "amyotrophic lateral sclerosis", "Neurodegenerative and Neurological Disorders",
+        "multiple sclerosis", "Neurodegenerative and Neurological Disorders",
+        "Down syndrome", "Neurodegenerative and Neurological Disorders",
+        "trisomy 18", "Neurodegenerative and Neurological Disorders",
+        "frontotemporal dementia", "Neurodegenerative and Neurological Disorders",
+        "temporal lobe epilepsy", "Neurodegenerative and Neurological Disorders",
+        "Lewy body dementia", "Neurodegenerative and Neurological Disorders",
+        "amyotrophic lateral sclerosis 26 with or without frontotemporal dementia", "Neurodegenerative and Neurological Disorders",
+        
+        # Respiratory Conditions
+        "pulmonary fibrosis", "Respiratory Conditions",
+        "respiratory system disorder", "Respiratory Conditions",
+        "chronic obstructive pulmonary disease", "Respiratory Conditions",
+        "cystic fibrosis", "Respiratory Conditions",
+        "interstitial lung disease", "Respiratory Conditions",
+        "hypersensitivity pneumonitis", "Respiratory Conditions",
+        "non-specific interstitial pneumonia", "Respiratory Conditions",
+        "aspiration pneumonia", "Respiratory Conditions",
+        "pulmonary emphysema", "Respiratory Conditions",
+        "pulmonary sarcoidosis", "Respiratory Conditions",
+        
+        # Cardiovascular Diseases
+        "myocardial infarction", "Cardiovascular Diseases",
+        "acute myocardial infarction", "Cardiovascular Diseases",
+        "dilated cardiomyopathy", "Cardiovascular Diseases",
+        "heart failure", "Cardiovascular Diseases",
+        "arrhythmogenic right ventricular cardiomyopathy", "Cardiovascular Diseases",
+        "congenital heart disease", "Cardiovascular Diseases",
+        "non-compaction cardiomyopathy", "Cardiovascular Diseases",
+        "cardiomyopathy", "Cardiovascular Diseases",
+        "heart disorder", "Cardiovascular Diseases",
+        
+        # Metabolic and Other Disorders
+        "type 2 diabetes mellitus", "Metabolic and Other Disorders",
+        "chronic kidney disease", "Metabolic and Other Disorders",
+        "digestive system disorder", "Metabolic and Other Disorders",
+        "primary sclerosing cholangitis", "Metabolic and Other Disorders",
+        "gastritis", "Metabolic and Other Disorders",
+        "acute kidney failure", "Metabolic and Other Disorders",
+        "tubular adenoma", "Metabolic and Other Disorders",
+        "benign prostatic hyperplasia", "Metabolic and Other Disorders",
+        "opiate dependence", "Metabolic and Other Disorders",
+        "gingivitis", "Metabolic and Other Disorders",
+        "hyperplastic polyp", "Metabolic and Other Disorders",
+        "clonal hematopoiesis", "Metabolic and Other Disorders",
+        "epilepsy", "Metabolic and Other Disorders",
+        "age related macular degeneration 7", "Metabolic and Other Disorders",
+        "kidney benign neoplasm", "Metabolic and Other Disorders",
+        "malignant pancreatic neoplasm", "Metabolic and Other Disorders",
+        "cataract", "Metabolic and Other Disorders",
+        "macular degeneration", "Metabolic and Other Disorders",
+        "hydrosalpinx", "Metabolic and Other Disorders",
+        "tubulovillous adenoma", "Metabolic and Other Disorders",
+        "gastric intestinal metaplasia", "Metabolic and Other Disorders",
+        "Barrett esophagus", "Metabolic and Other Disorders",
+        
+        # Other Diseases
+        "injury", "Other Diseases",
+        "anencephaly", "Other Diseases",
+        "primary biliary cholangitis", "Other Diseases",
+        "keloid", "Other Diseases",
+        "kidney oncocytoma", "Other Diseases",
+        "respiratory failure", "Other Diseases",
+        "pilocytic astrocytoma", "Other Diseases"
+      )
+      
+      temp_path = tempdir()
+      system(glue("~/bin/rclone copy box_adelaide:/minh_immune_map_disease/disease_data_grouped_further.csv {temp_path}/"))
+      
+      disease_data_grouped = 
+        disease_data_grouped |> 
+        left_join(
+          read_csv(glue("{temp_path}/disease_data_grouped_further.csv")) |> 
+            rename(disease_groups_further = disease_groups)
+        ) |> 
+        mutate(disease_groups = if_else(!disease_groups_further |> is.na(), disease_groups_further, disease_groups)) |> 
+        select(disease,  disease_groups)
+      
+      tbl |> 
+        
+        # TISSUE
+        select(-any_of("tissue_groups")) |> 
+        left_join(tissue_grouped, copy=TRUE) |> 
+        
+        # TECH
+        left_join(assay_data_grouped, copy=TRUE) |> 
+        
+        # DISEASE
+        left_join(disease_data_grouped, copy=TRUE) |> 
+        
+        # make disease tissue specific, omit Normal
+        mutate(disease_groups = paste(disease_groups, tissue_groups, sep = "_")) |> 
+        mutate(disease_groups = if_else(disease_groups |> str_detect("Normal_.+"), "Normal", disease_groups))  |> 
+        
+        
+        # TEMPORARY. de-group pancreas and liver
+        mutate(tissue_groups = case_when(
+          
+          tissue %in% c("gallbladder") ~ "gallbladder",
+          tissue %in% c("pancreas", "exocrine pancreas") ~ "pancreas",
+          tissue %in% c("liver", "caudate lobe of liver", "hepatic cecum" ) ~ "liver",
+          TRUE ~ tissue_groups
+        )) |> 
+        
+        # SEX edit
+        mutate(sex = if_else(sex |> is.na(), "unknown", sex)) |> 
+        
+        # Age
+        mutate(age_years = age_days / 365) |> 
+        mutate(age_bin = dplyr::case_when(
+          age_years < 3 ~ "Infancy",
+          age_years < 12 ~ "Childhood",
+          age_years < 20 ~ "Adolescence",
+          age_years < 40 ~ "Young Adulthood",
+          age_years < 50 ~ "Middle Age",
+          age_years < 60 ~ "Senior_50",
+          age_years < 70 ~ "Senior_60",
+          age_years >= 70 ~ "Senior_70",
+          TRUE ~ NA_character_
+        )) |> 
+        mutate(age_decade = ceiling(age_years/10) |> as.integer() |> as.character()) |> 
+        
+        # left_join(age_bin_table, copy=TRUE) |> 
+        
+        # ETHNICITY
+        left_join(ethnicity_grouped, copy=TRUE) |> 
+        
+        dplyr::select(
+          cell_id, sample_id, donor_id, dataset_id, title, collection_id, age_days, age_bin, age_decade, sex, 
+          ethnicity_groups, tissue_groups, tissue, assay_groups, cell_type_unified_ensemble,
+          cell_type, disease_groups, is_immune
+        ) |> 
+        as_tibble() |> 
+        
+        # Center based on adolescence
+        mutate(age_days_scaled = age_days  |> scale(center = 50*365) |> as.numeric()) 
+      
+    }     
+    
+```
+## Load and prepare metadata
+
+Join the project-specific tissue labels and keep only records with a defined `tissue_label`.
+
+```{r}
+#| label: load_metadata
+my_metadata =
+    get_metadata() |>
+    edit_covariates() |> 
+    left_join(readr::read_csv(here("tissue_groups_to_labels.csv")), copy = TRUE) |>
+    filter(!is.na(tissue_label))
+```
+
+## Compute QC metrics
+
+Calculate all per-tissue QC summaries (proportions, counts, and pre-formatted labels for plotting).
+
+```{r}
+#| label: compute_metrics
+empty_droplet_proportion = 
+    my_metadata |> 
+    count(empty_droplet, tissue_label, sample_id, dataset_id) |>
+    pivot_wider(names_from = empty_droplet, values_from = n) |> 
+    mutate(`FALSE` = if_else(is.na(`FALSE`), 0, `FALSE`), `TRUE` = if_else(is.na(`TRUE`), 0, `TRUE`)) |> 
+    mutate(empty_proportion = `TRUE`/(`TRUE` + `FALSE`)) |> 
+    summarise(mean_empty_proportion = mean(empty_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_empty = paste0(signif(mean_empty_proportion * 100, 2), "%"))
+
+dead_proportion = 
+    my_metadata |> 
+    filter(!empty_droplet) |> 
+    count(alive, tissue_label, sample_id, dataset_id) |> 
+    pivot_wider(names_from = alive, values_from = n) |> 
+    rename(`FALSE` = `NA`) |> 
+    mutate(`FALSE` = if_else(is.na(`FALSE`), 0, `FALSE`), `TRUE` = if_else(is.na(`TRUE`), 0, `TRUE`)) |> 
+    mutate(dead_proportion = `FALSE`/(`TRUE` + `FALSE`)) |> 
+    summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_dead = paste0(signif(mean_dead_proportion * 100, 2), "%"))
+
+doublet_proportion = 
+    my_metadata |> 
+    filter(!empty_droplet) |> 
+    filter(alive) |> 
+    count(scDblFinder.class, tissue_label, sample_id, dataset_id) |> 
+     pivot_wider(names_from = scDblFinder.class, values_from = n) |> 
+    mutate(`doublet` = if_else(is.na(`doublet`), 0, `doublet`), `singlet` = if_else(is.na(`singlet`), 0, `singlet`)) |> 
+    filter(singlet+doublet > 0) |> 
+    mutate(doublet_proportion = `doublet`/(`doublet` + `singlet`)) |> 
+    summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_doublet = paste0(signif(mean_doublet_proportion * 100, 2), "%"))
+
+feature_count = 
+    my_metadata |> 
+    summarise(mean_feature_count = mean(feature_count, na.rm = TRUE), .by=c(tissue_label, sample_id)) |> 
+    summarise(mean_feature_count = mean(mean_feature_count, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_features = ifelse(mean_feature_count >= 1000, 
+                                     paste0(signif(mean_feature_count/1000, 1), "K"),
+                                     as.character(signif(mean_feature_count, 1))))
+
+donor_size = 
+    my_metadata |> 
+    distinct(tissue_label, donor_id) |> 
+    count(tissue_label) |> 
+    rename(donor_count = n) |>
+    collect() |>
+    mutate(label_donors = ifelse(donor_count >= 1000,
+                                   paste0(signif(donor_count/1000, 1), "K"),
+                                   as.character(signif(donor_count, 1))))
+
+dataset_size = 
+    my_metadata |> 
+    distinct(tissue_label, dataset_id) |> 
+    count(tissue_label) |> 
+    rename(dataset_size = n) |>
+    collect() |>
+    mutate(label_datasets = ifelse(dataset_size >= 1000,
+                                     paste0(signif(dataset_size/1000, 1), "K"),
+                                     as.character(signif(dataset_size, 1))))
+
+cell_count_mean = 
+    my_metadata |> 
+    count(tissue_label, sample_id, dataset_id) |> 
+    summarise(mean_cell_count = mean(n, na.rm = TRUE), .by=tissue_label) |>
+    collect() |>
+    mutate(label_cells_mean = ifelse(mean_cell_count >= 1000,
+                                       paste0(signif(mean_cell_count/1000, 1), "K"),
+                                       as.character(signif(mean_cell_count, 1))))
+
+cell_count = 
+    my_metadata |> 
+    count(tissue_label) |>
+    collect() |>
+    mutate(label_cells = ifelse(n >= 1000,
+                                  paste0(signif(n/1000, 1), "K"),
+                                  as.character(signif(n, 1))))
+
+missing_annotation_ethnicity_proportion = 
+    my_metadata |> 
+    filter(age_days >= 365) |> 
+    filter(!grepl("fetal|embryo|placenta|cord blood", tolower(tissue), ignore.case = TRUE)) |> 
+    mutate(is_missing_annotation_ethnicity = self_reported_ethnicity == "unknown") |> 
+    distinct(donor_id, tissue_label, is_missing_annotation_ethnicity) |> 
+    count(tissue_label, is_missing_annotation_ethnicity) |> 
+    pivot_wider(names_from = is_missing_annotation_ethnicity, values_from = n) |> 
+    mutate(proportion_missing_annotation_ethnicity = `TRUE`/(`TRUE` + `FALSE`)) |> 
+    mutate(proportion_missing_annotation_ethnicity = if_else(is.na(proportion_missing_annotation_ethnicity), 0, proportion_missing_annotation_ethnicity)) |> 
+    select(tissue_label, proportion_missing_annotation_ethnicity) |>
+    collect() |>
+    mutate(label_ethnicity = paste0(signif(proportion_missing_annotation_ethnicity * 100, 2), "%"))
+
+missing_annotation_sex_proportion = 
+    my_metadata |> 
+  filter(age_days >= 365) |> 
+  filter(!grepl("fetal|embryo|placenta|cord blood", tolower(tissue), ignore.case = TRUE)) |> 
+  mutate(is_missing_annotation_sex = sex == "unknown" | is.na(sex)) |> 
+  distinct(donor_id, tissue_label, is_missing_annotation_sex) |> 
+  count(tissue_label, is_missing_annotation_sex) |> 
+  pivot_wider(names_from = is_missing_annotation_sex, values_from = n) |> 
+  mutate(proportion_missing_annotation_sex = `TRUE`/(`TRUE` + `FALSE`)) |> 
+   mutate(proportion_missing_annotation_sex = if_else(is.na(proportion_missing_annotation_sex), 0, proportion_missing_annotation_sex)) |> 
+    select(tissue_label, proportion_missing_annotation_sex) |>
+    collect() |>
+    mutate(label_sex = paste0(signif(proportion_missing_annotation_sex * 100, 2), "%")) 
+```
+
+## Assemble wide QC table
+
+Combine all metric tables into a single wide table keyed by `tissue_label`.
+
+```{r}
+#| label: assemble_qc_table
+qc_table = 
+    empty_droplet_proportion |> 
+    left_join(dead_proportion) |> 
+    left_join(doublet_proportion) |> 
+    left_join(feature_count) |> 
+    left_join(donor_size) |> 
+    left_join(cell_count_mean) |> 
+    left_join(cell_count) |> 
+    left_join(missing_annotation_ethnicity_proportion) |> 
+    left_join(missing_annotation_sex_proportion) |>
+    left_join(dataset_size) |>
+    filter(!is.na(tissue_label))
+```
+
+## Reshape for plotting and build figures
+
+Pivot the wide table to long format, attach labels, set facet/row ordering, and produce the bar and bubble plots.
+
+```{r}
+#| label: reshape_long
+#| fig-width: 7
+#| fig-height: 17
+# Reshape data to long format for visualization
+qc_table_values = 
+  qc_table |> 
+  select(tissue_label, mean_empty_proportion, mean_dead_proportion, mean_doublet_proportion, mean_feature_count, 
+         donor_count, mean_cell_count, n, 
+         proportion_missing_annotation_ethnicity, proportion_missing_annotation_sex, dataset_size) |> 
+  as_tibble() |> 
+  pivot_longer(cols = -tissue_label, names_to = "metric", values_to = "value")
+
+qc_table_labels = 
+  qc_table |> 
+  select(tissue_label, label_empty, label_dead, label_doublet, label_features,
+         label_donors, label_cells_mean, label_cells, label_ethnicity, label_sex, label_datasets) |> 
+  as_tibble() |> 
+  pivot_longer(cols = -tissue_label, names_to = "label_metric", values_to = "label")
+
+# Map metric names to label names
+metric_to_label_map = c(
+  "mean_empty_proportion" = "label_empty",
+  "mean_dead_proportion" = "label_dead",
+  "mean_doublet_proportion" = "label_doublet",
+  "mean_feature_count" = "label_features",
+  "donor_count" = "label_donors",
+  "mean_cell_count" = "label_cells_mean",
+  "n" = "label_cells",
+  "proportion_missing_annotation_ethnicity" = "label_ethnicity",
+  "proportion_missing_annotation_sex" = "label_sex",
+  "dataset_size" = "label_datasets"
+)
+
+qc_table_long = 
+  qc_table_values |> 
+  mutate(label_metric = metric_to_label_map[metric]) |> 
+  left_join(qc_table_labels, by = c("tissue_label", "label_metric")) |>
+
+  # abbreviate metrics names smartly
+  mutate(metric_label = case_when(
+    metric == "mean_empty_proportion" ~ "Empty",
+    metric == "mean_dead_proportion" ~ "Alive",
+    metric == "mean_doublet_proportion" ~ "Doublet",
+    metric == "mean_feature_count" ~ "Features",
+    metric == "donor_count" ~ "Donors",
+    metric == "mean_cell_count" ~ "Cells mean",
+    metric == "proportion_missing_annotation_ethnicity" ~ "Ethnicity",
+    metric == "proportion_missing_annotation_sex" ~ "Sex",
+    metric == "n" ~ "Cells",
+    metric == "dataset_size" ~ "Datasets"
+  )) |>
+  mutate(metric_label = metric_label |> fct_relevel("Sex", "Ethnicity", "Doublet", "Alive", "Empty", "Features", "Datasets", "Donors", "Cells mean"))  |>
+
+  # Donors/datasets to log10 for bar length; labels remain from precomputed columns
+  mutate(value = if_else(metric == "donor_count" | metric == "dataset_size", log10(value), value)) |>
+
+  # NA handling
+  mutate(value = if_else(is.na(value), 0, value)) |>
+
+# add ordering column based on donor count
+nest(data = -tissue_label)  |>
+mutate(ordering = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
+unnest(data) |>
+    left_join(readr::read_csv(here("tissue_labels_to_macrocategories.csv")), copy = TRUE) |>
+    mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
+
+    # order macrocategories by ordering column
+    nest(data = -macrocategory) |>
+    mutate(ordering_macrocategory = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
+    unnest(data) |>
+    # Ensure "Other" category appears first
+    mutate(ordering_macrocategory = if_else(macrocategory == "Other", max(ordering_macrocategory, na.rm = TRUE) + 1, ordering_macrocategory)) 
+  
+
+# Create bar plots with metrics as columns and tissues as rows
+plot_barplots = 
+   qc_table_long |> 
+  filter(metric_label != "Cells") |>
+  mutate(max_value = max(value, na.rm = TRUE), .by = metric_label) |>
+  mutate(threshold = max_value * 0.15) |>
+  ggplot(aes(x = value, y = fct_reorder(tissue_label, ordering, .desc = TRUE), fill = metric_label)) +
+  geom_col() +
+  geom_text(aes(
+    label = label,  # Use pre-computed labels from tables
+    x = max_value * 0.98  # Fixed position near the right edge (2% offset)
+  ), hjust = 1, color = "black", size = 1) +
+  scale_fill_manual(values = c(
+    "Cells mean" = "#384E55",
+    "Donors" = "#00A1D5",
+    "Datasets" = "#79AE96",
+    "Features" = "#DF8E42",
+    "Alive" = "#B34846",
+    "Empty" = "#6A6599",
+    "Doublet" = "#8B7B6A",
+    "Ethnicity" = "#95C0B5",
+    "Sex" = "#D4A373"
+  )) +
+  facet_grid(fct_reorder(macrocategory, ordering_macrocategory) ~ metric_label, scales = "free", space = "free_y") +
+  theme_multipanel +
+  theme(
+    strip.text.y = element_blank(),
+    strip.text.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_text()
+  ) +
+  labs(x = "Value", y = "Tissue", fill = "Metric")
+
+# n should be a bubble plot that you patchwork with the other plots
+plot_n = 
+  qc_table_long |> 
+  left_join(readr::read_csv(here("tissue_labels_to_macrocategories.csv")), copy = TRUE) |>
+  mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
+  filter(metric == "n") |> 
+  ggplot(aes(x = 1, y = fct_reorder(tissue_label, ordering, .desc = TRUE))) +
+  geom_point(aes(size = value)) +
+  facet_grid(fct_reorder(macrocategory, ordering_macrocategory) ~ metric_label, scales = "free", space = "free_y") +
+  theme_multipanel +
+  theme(
+    strip.text.x = element_text(angle = 90, vjust = 1, hjust = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank()
+  ) 
+
+# Compose
+library(patchwork)
+plot_barplots + plot_n + plot_annotation(tag_levels = 'A') + 
+plot_layout(guides = 'collect', nrow = 1, widths = c(8, 1.5)) &
+  theme(plot.margin = margin(0, 0, 0, 0, "pt"), legend.position = "bottom")
+```
+
+## Save figure
+
+Export the combined figure to `quality_control/tissue_landscape.pdf` for downstream use.
+
+```{r}
+#| label: save_plot
+# save within directory
+ggsave(here("quality_control", "tissue_landscape.pdf"), width = 70, height = 170, plot = last_plot(), units = "mm")
+```
