@@ -54,8 +54,9 @@ Calculate all per-tissue QC summaries (proportions, counts, and pre-formatted la
 empty_droplet_proportion = 
     my_metadata |> 
     count(empty_droplet, tissue_label, sample_id, dataset_id) |>
-    mutate(empty_proportion = n/sum(n), .by = sample_id) |> 
-    filter(empty_droplet) |> 
+    pivot_wider(names_from = empty_droplet, values_from = n) |> 
+    mutate(`FALSE` = if_else(is.na(`FALSE`), 0, `FALSE`), `TRUE` = if_else(is.na(`TRUE`), 0, `TRUE`)) |> 
+    mutate(empty_proportion = `TRUE`/(`TRUE` + `FALSE`)) |> 
     summarise(mean_empty_proportion = mean(empty_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_empty = paste0(signif(mean_empty_proportion * 100, 1), "%"))
@@ -63,9 +64,10 @@ empty_droplet_proportion =
 dead_proportion = 
     my_metadata |> 
     count(alive, tissue_label, sample_id, dataset_id) |> 
-    mutate(alive = if_else(is.na(alive), FALSE, alive)) |> 
-      mutate(dead_proportion = n/sum(n), .by = sample_id) |> 
-  filter(!alive) |> 
+    pivot_wider(names_from = alive, values_from = n) |> 
+  rename(`FALSE` = `NA`) |> 
+    mutate(`FALSE` = if_else(is.na(`FALSE`), 0, `FALSE`), `TRUE` = if_else(is.na(`TRUE`), 0, `TRUE`)) |> 
+    mutate(dead_proportion = `TRUE`/(`TRUE` + `FALSE`)) |> 
     summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_dead = paste0(signif(mean_dead_proportion * 100, 1), "%"))
@@ -73,8 +75,10 @@ dead_proportion =
 doublet_proportion = 
     my_metadata |> 
     count(scDblFinder.class, tissue_label, sample_id, dataset_id) |> 
-    mutate(doublet_proportion = n/sum(n), .by = sample_id) |> 
-    filter(scDblFinder.class == "doublet") |> 
+     pivot_wider(names_from = scDblFinder.class, values_from = n) |> 
+    mutate(`doublet` = if_else(is.na(`doublet`), 0, `doublet`), `singlet` = if_else(is.na(`singlet`), 0, `singlet`)) |> 
+    filter(singlet+doublet > 0) |> 
+    mutate(doublet_proportion = `doublet`/(`doublet` + `singlet`)) |> 
     summarise(mean_doublet_proportion = mean(doublet_proportion, na.rm = TRUE), .by=tissue_label) |>
     collect() |>
     mutate(label_doublet = paste0(signif(mean_doublet_proportion * 100, 1), "%"))
