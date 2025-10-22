@@ -15,14 +15,14 @@ Load required packages and a shared ggplot theme used across figures.
 
 # Install BiocManager if not available
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
-  install.packages("BiocManager", repos = "https://cloud.r-project.org", lib = .libPaths())
+  install.packages("BiocManager", repos = "https://cloud.r-project.org") #, lib = .libPaths())
 }
 
 # Function to check and install packages
 check_and_install <- function(packages) {
   for (pkg in packages) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      BiocManager::install(pkg, ask = FALSE, update = FALSE, lib = .libPaths())
+      BiocManager::install(pkg, ask = FALSE, update = FALSE) # , lib = .libPaths())
     }
   }
 }
@@ -55,7 +55,6 @@ library(cellNexus)
 # Import theme_multipanel
 source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
 ```
-
 
 ```{r}
  edit_covariates = function(tbl){
@@ -558,21 +557,12 @@ source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100
         # left_join(age_bin_table, copy=TRUE) |> 
         
         # ETHNICITY
-        left_join(ethnicity_grouped, copy=TRUE) |> 
-        
-        dplyr::select(
-          cell_id, sample_id, donor_id, dataset_id, title, collection_id, age_days, age_bin, age_decade, sex, 
-          ethnicity_groups, tissue_groups, tissue, assay_groups, cell_type_unified_ensemble,
-          cell_type, disease_groups, is_immune
-        ) |> 
-        as_tibble() |> 
-        
-        # Center based on adolescence
-        mutate(age_days_scaled = age_days  |> scale(center = 50*365) |> as.numeric()) 
+        left_join(ethnicity_grouped, copy=TRUE) 
       
     }     
     
 ```
+
 ## Load and prepare metadata
 
 Join the project-specific tissue labels and keep only records with a defined `tissue_label`.
