@@ -21,19 +21,19 @@ knitr:
 This report provides an overview of doublet differential expression analysis from cellNexus. It outlines the workflow steps, including data filtering, pseudobulk aggregation, quality control, dispersion estimation, DE analysis, and visualization.
 
 ```{r setup}
-.libPaths("/Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library")
+# .libPaths("/Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library")
 
 required_packages <- c(
-  "ggalluvial",
+#  "ggalluvial",
   "stringr",
-  "ggfittext",
+#  "ggfittext",
   "dplyr",
   "purrr",
   "ggplot2",
   "SummarizedExperiment",
   "SingleCellExperiment",
   "viridis",
-  "packcircles",
+#  "packcircles",
   "ggrepel",
   "patchwork",
   "cellNexus",
@@ -61,147 +61,681 @@ lapply(required_packages, function(pkg) {
     library(pkg, character.only = TRUE)
   }
 })
-source(here::here("doublet_DE", "plot_custom_theme.R"))
-source(here::here("doublet_DE", "CAQ_age_analysis_functions.R"))
+#source(here::here("doublet_DE", "plot_custom_theme.R"))
+#source(here::here("doublet_DE", "CAQ_age_analysis_functions.R"))
 ```
 
 # Load and process data
 ```{r}
-library(tidyverse)
-
-
-
 library(targets)
-tar_script({  
 
-    # Helper (optional) to avoid repetition
-    new_elastic <- function(name, mem_gb, time_min, workers, crashes_max, backup = NULL) {
-      crew_controller_slurm(
-        name = name,
-        workers = workers,
-        crashes_max = crashes_max,
-        seconds_idle = 30,
-        options_cluster = crew_options_slurm(
-          memory_gigabytes_required = mem_gb,
-          cpus_per_task = 8,
-          time_minutes = time_min
-        ),
-        backup = backup
-      )
-    }
-    
-    # Small → large, with fallbacks to the next size up
-    elastic_160 <- new_elastic("elastic_160", 160, 60 * 24, workers = 8,  crashes_max = 2)
-    elastic_80  <- new_elastic("elastic_80",   80,  60 * 4,  workers = 16, crashes_max = 1, backup = elastic_160)
-    elastic_40  <- new_elastic("elastic_40",   40,  60 * 4,  workers = 24, crashes_max = 1, backup = elastic_80)
-    elastic_20  <- new_elastic("elastic_20",   20,  60 * 4,  workers = 32, crashes_max = 1, backup = elastic_40)
-    elastic_10  <- new_elastic("elastic_10",   10,  60 * 4,  workers = 48, crashes_max = 1, backup = elastic_20)
-    elastic_5   <- new_elastic("elastic_5",     5, 60 * 4,  workers = 64, crashes_max = 6, backup = elastic_10)
-    
-    # Group for targets (small → large)
-    controllers <- crew_controller_group(
-      elastic_5, elastic_10, elastic_20, elastic_40, elastic_80, elastic_160
+tar_script({
+  library(targets)
+  library(crew)
+  library(crew.cluster)
+  # Helper (optional) to avoid repetition
+  new_elastic <- function(name,
+                          mem_gb,
+                          time_min,
+                          workers,
+                          crashes_max,
+                          backup = NULL) {
+    crew_controller_slurm(
+      name = name,
+      workers = workers,
+      crashes_max = crashes_max,
+      seconds_idle = 30,
+      options_cluster = crew_options_slurm(
+        memory_gigabytes_required = mem_gb,
+        cpus_per_task = 2,
+        time_minutes = time_min
+      ),
+      backup = backup
     )
+  }
+  
+  # Small → large, with fallbacks to the next size up
+  elastic_160 <- new_elastic("elastic_160",
+                             160,
+                             60 * 24,
+                             workers = 8,
+                             crashes_max = 2)
+  elastic_80  <- new_elastic(
+    "elastic_80",
+    80,
+    60 * 4,
+    workers = 16,
+    crashes_max = 1,
+    backup = elastic_160
+  )
+  elastic_40  <- new_elastic(
+    "elastic_40",
+    40,
+    60 * 4,
+    workers = 24,
+    crashes_max = 1,
+    backup = elastic_80
+  )
+  elastic_20  <- new_elastic(
+    "elastic_20",
+    20,
+    60 * 4,
+    workers = 32,
+    crashes_max = 1,
+    backup = elastic_40
+  )
+  elastic_10  <- new_elastic(
+    "elastic_10",
+    10,
+    60 * 4,
+    workers = 200,
+    crashes_max = 1,
+    backup = elastic_20
+  )
+  elastic_5   <- new_elastic(
+    "elastic_5",
+    5,
+    60 * 4,
+    workers = 200,
+    crashes_max = 6,
+    backup = elastic_10
+  )
+  
+  # Group for targets (small → large)
+  controllers <- crew_controller_group(elastic_5,
+                                       elastic_10,
+                                       elastic_20,
+                                       elastic_40,
+                                       elastic_80,
+                                       elastic_160)
+  
+  tar_option_set(
+    memory = "transient",
+    garbage_collection = 100,
+    storage = "worker",
+    retrieval = "worker",
+    #error = "continue",
     
-    tar_option_set(
-      
-      
-      memory = "transient", 
-      garbage_collection = 100, 
-      storage = "worker", 
-      retrieval = "worker", 
-      error = "continue", 
-      
-      #cue = tar_cue(mode = "never"), 
-      
-      workspace_on_error = TRUE,
-      format = "qs", 
-      
-      workspaces = "estimates_chunk_633f6596569029e6", 
-      debug = "estimates_chunk_8da8c24dbc0993bb",
-      
-      controller = controllers
-      
-    )
-
+    #cue = tar_cue(mode = "never"),
+    
+    workspace_on_error = TRUE,
+    format = "qs",
+    
+    workspaces = "estimates_chunk_633f6596569029e6",
+    debug = "sample_aggregated",
+    
+    controller = controllers
+    
+  )
+  
   get_my_metadata <- function() {
-    get_metadata() |> 
-      filter(
-          empty_droplet == FALSE,
-          alive == TRUE,
-          feature_count >= 8000
-      ) |>
+    get_metadata() |>
+      filter(empty_droplet == FALSE, alive == TRUE, feature_count >= 8000) |>
       mutate(scDblFinder.class %in% c("singlet", "doublet"))
   }
-
+  
   list(
+    tar_target(
+      my_cache_directory,
+      "/vast/projects/cellxgene_curated/cellNexus/"
+    ),
+    tar_target(my_doublet_proportion, 0.05),
     tar_target(
       my_sample_id,
       get_my_metadata() |>
-      count(sample_id, dataset_id, scDblFinder.class) |>
-      mutate(doublet_proportion = n/sum(n), .by = sample_id) |>
-      filter(scDblFinder.class == "doublet") |>
-      filter(doublet_proportion > 0.05) |>
+        count(sample_id, dataset_id, scDblFinder.class) |>
+        mutate(doublet_proportion = n / sum(n), .by = sample_id) |>
+        filter(scDblFinder.class == "doublet") |>
+        filter(doublet_proportion > my_doublet_proportion) |>
+        
+        # get datasets with most samples
+        collect() |>
+        nest(data = -dataset_id) |>
+        mutate(n_samples = map_int(data, ~ n_distinct(.x$sample_id))) |>
+        arrange(desc(n_samples)) |>
+        filter(n_samples >= 10) |>
+        unnest(data) |>
+        pull(sample_id) |>
+        unique() ,
 
-      # get datasets with most samples
-      collect() |>
-      nest(data = -dataset_id) |>
-      mutate(n_samples = map_int(data, ~ n_distinct(.x$sample_id))) |>
-      arrange(desc(n_samples)) |>
-      filter(n_samples >= 10) |>
-      unnest(data) |>
-      pull(sample_id) |>
-      unique() |>
-      head(2),
-        # TEMPORARY
-        # _[1:2],
-        packages = c("cellNexus", "dplyr", "tidyr", "purrr")
+      packages = c("cellNexus", "dplyr", "tidyr", "purrr"),
+      iteration = "list"
     ),
     tar_target(
       sample_aggregated,
       {
-      sce <- 
-      get_my_metadata() |>
-        filter(sample_id == my_sample_id) |>
-        get_single_cell_experiment() # cache_directory = "~/scratch/cellNexus"
-
-      sce |>
-        scuttle::aggregateAcrossCells(
-          colData(sce)[,c("sample_id","scDblFinder.class")] |> 
-            as_tibble(rownames = ".cell") |>
-            mutate(aggregated_cells = paste(sample_id,scDblFinder.class, sep = "___")) |>
-            pull(aggregated_cells),
-          BPPARAM = BiocParallel::MulticoreParam(
-            workers = parallelly::availableCores(), 
-            progressbar = T
+        sce <-
+          get_my_metadata() |>
+          filter(sample_id == my_sample_id) |>
+          get_single_cell_experiment(cache_directory = my_cache_directory)
+        
+        sce |>
+          scuttle::aggregateAcrossCells(
+            colData(sce)[, c("sample_id", "scDblFinder.class")] |>
+              as_tibble(rownames = ".cell") |>
+              mutate(
+                aggregated_cells = paste(sample_id, scDblFinder.class, sep = "___")
+              ) |>
+              pull(aggregated_cells)
+            # ,
+            # BPPARAM = BiocParallel::MulticoreParam(
+            #   workers = parallelly::availableCores()
+            # )
           )
-        ) 
-        },
-        pattern = map(my_sample_id), 
-        packages = c("cellNexus", "scuttle", "dplyr", "BiocParallel")
+      },
+      pattern = map(my_sample_id),
+      iteration = "list",
+      packages = c(
+        "cellNexus",
+        "scuttle",
+        "dplyr",
+        "BiocParallel",
+        "parallelly"
+      )
     ),
-
+    
     # Get shared genes across all samples
     tar_target(
       genes_list,
       sample_aggregated |> rownames(),
-        packages = c("SummarizedExperiment", "dplyr", "tidyr"),
-        pattern = map(sample_aggregated)
+      packages = c("SummarizedExperiment", "dplyr", "tidyr"),
+      pattern = map(sample_aggregated),
+      iteration = "list"
     ),
-    tar_target( shared_genes,  genes_list |>  unique() ),
-    tar_target( sample_aggregated_filtered,
-      sample_aggregated[rownames(sample_aggregated) %in% shared_genes,] |>
-        as("SummarizedExperiment") |>
-        list(),
-      packages = c("SummarizedExperiment", "dplyr", "tidyr", "tidySingleCellExperiment", "purrr"),
-      pattern = map(sample_aggregated)
+    tar_target(shared_genes, genes_list |> Reduce(intersect, x = _)),
+    tar_target(
+      sample_aggregated_filtered,
+      {
+        sample_aggregated =
+          sample_aggregated[rownames(sample_aggregated) %in% shared_genes, ]
+        
+        rn = rownames(sample_aggregated)
+        
+        sample_aggregated =
+          sample_aggregated |>
+          as("SummarizedExperiment")
+        
+        rownames(sample_aggregated) = rn
+        
+        sample_aggregated
+      },
+      packages = c(
+        "SummarizedExperiment",
+        "dplyr",
+        "tidyr",
+        "tidySingleCellExperiment",
+        "purrr"
+      ),
+      pattern = map(sample_aggregated),
+      iteration = "list"
     ),
-    tar_target( se, sample_aggregated_filtered |> do.call(cbind, args=_) )
+    tar_target(
+      se_dataset,
+      {
+        se =
+          sample_aggregated_filtered |>
+          map(~ .x |> select(.feature, .sample, counts, contains("_id"), scDblFinder.class, ncells)) |> 
+          do.call(cbind, args = _)
+        
+        dp =
+          se |>
+          pivot_sample() |>
+          mutate(doublet_proportion = ncells / sum(ncells),
+                 .by = sample_id) |>
+          filter(scDblFinder.class == "doublet") |>
+          distinct(sample_id, doublet_proportion)
+        
+        se |>
+          left_join(dp) |>
+          filter(doublet_proportion > my_doublet_proportion) |>
+          filter(ncells > 10) |>
+          filter(sample_id %in% (
+            se |> pivot_sample() |> count(sample_id) |> filter(n == 2) |> pull(sample_id)
+          )) |>
+          filter(dataset_id %in% (
+            se |> pivot_sample() |> count(dataset_id) |> filter(n > 10) |> pull(dataset_id)
+          )) |>
+          group_split(dataset_id) |> 
+          
+          # Filter small datasets
+          map(~ { if(.x |> ncol() > 6 ) .x else NA}) |> 
+          discard(is_na)
+      },
+      iteration = "list",
+      packages = c("tidySummarizedExperiment", "SummarizedExperiment", "tidybulk", "rlang")
+    ),
+    tar_target(
+      se_de,
+      {
+        se_dataset |>
+          
+          mutate(
+            symbol = AnnotationDbi::mapIds(
+              org.Hs.eg.db::org.Hs.eg.db,
+              keys = .feature,
+              keytype = "ENSEMBL",
+              column = "SYMBOL",
+              multiVals = "first"
+            )
+          ) |>
+          mutate(
+            entrez = AnnotationDbi::mapIds(
+              org.Hs.eg.db::org.Hs.eg.db,
+              keys = .feature,
+              keytype = "ENSEMBL",
+              column = "ENTREZID",
+              multiVals = "first"
+            )
+          ) |>
+          mutate(scDblFinder.class  = scDblFinder.class |> fct_relevel("singlet", "doublet")) |>
+          
+          keep_abundant(
+            formula_design = ~ scDblFinder.class,
+            minimum_count_per_million = 20
+          )  |>
+          scale_abundance(method = "TMMwsp") |>
+          test_differential_expression(
+            .formula = ~  scDblFinder.class + sample_id,
+            scaling_method = "TMMwsp",
+            test_above_log2_fold_change = 1,
+            method = "edger_robust_likelihood_ratio",
+          )
+      },
+      iteration = "list",
+      pattern = map(se_dataset),
+      packages = c(
+        "org.Hs.eg.db",
+        "tidySummarizedExperiment",
+        "dplyr",
+        "tidyr",
+        "tidybulk",
+        "purrr", "forcats"
+      )
+    ),
+    tar_target(
+      gsea,
+      se_de |>
+        
+        filter(!entrez |> is.na()) |>
+        filter(!entrez |> duplicated()) |>
+        test_gene_rank(
+          .entrez = entrez,
+          species = "Homo sapiens",
+          .arrange_desc = logFC,
+          gene_sets = "c2"
+        ),
+      iteration = "list",
+      pattern = map(se_de),
+      packages = c(
+        "tidySummarizedExperiment",
+        "dplyr",
+        "tidyr",
+        "tidybulk",
+        "purrr"
+      )
+    ),
+    
+    tar_target(
+      gsea_plot,
+      gsea |>
+        
+        unnest(test) |>
+        filter(Description |> str_detect("ADH")) |>
+        filter(p.adjust <= 0.05) |>
+        mutate(plot = pmap(
+          list(fit, ID, idx_for_plotting, p.adjust),
+          ~ enrichplot::gseaplot2(
+            ..1,
+            geneSetID = ..3,
+            title = sprintf("%s \nadj pvalue %s", ..2, round(..4, 2)),
+            base_size = 6,
+            rel_heights = c(1.5, 0.5),
+            subplots = c(1, 2)
+          )
+        )) |>
+        pull(plot),
+      iteration = "list",
+      pattern = map(gsea),
+      packages = c(
+        "tidySummarizedExperiment",
+        "dplyr",
+        "tidyr",
+        "purrr", "stringr"
+      )
+    )
+    
   )
 }, ask = FALSE, script = here::here("doublet_DE", "_targets.R"))
-tar_make(script = here::here("doublet_DE", "_targets.R"))
 
-tar_read(sample_aggregated_filtered)[[1]]
+tar_make(script = here::here("doublet_DE", "_targets.R"),
+         store = "/vast/scratch/users/mangiola.s/doublet_DE/targets")
+
+tar_workspace(
+  se_dataset,
+  script = here::here("doublet_DE", "_targets.R"),
+ store = "/vast/scratch/users/mangiola.s/doublet_DE/targets"
+)
+```
+
+```{r}
+library(targets)
+library(tidySummarizedExperiment)
+library(tidybulk)
+library(here)
+library(forcats)
+library(magrittr)
+
+# Adhesion genes
+library(tibble)
+
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+        library(enrichplot)
+  library(patchwork)
+
+doublet_markers <- tribble(
+  ~category,                 ~symbol,                                                                                           ~rationale,
+  "Erythroid / ambient",     c("HBA1","HBA2","HBB","HBG1","HBG2","HBD","ALAS2","AHSP"),                                          "Erythrocyte RNA in non-erythroid cells.",
+  "Platelet / megakary",     c("PF4","PPBP","ITGA2B","ITGB3","NRGN","SPARC","THBS1"),                                            "Platelets adhering to other cells.",
+  "Mitochondrial / stress",  c("MT-CO1","MT-CO2","MT-ATP6","MT-ND1","MT-ND2","FOS","JUN","JUNB","DUSP1","HSPA1A","HSP90AA1"),   "Damage or stress in multiplets.",
+  "Adhesion / ECM mix",      c("CD44","VIM","ANXA2","LGALS1","FN1","SPARC"),                                                     "Cross-lineage adhesion signatures.",
+  "Integrins",   c("ITGA6","ITGB5","ITGA1","ITGB8-AS1","ITGA5","ITGA7","ITGA11","ITGAX","ITGA2B","ITGA3"),           "Integrins specifically requested for doublet screening."
+) %>%
+  mutate(symbol = as.list(symbol))  |>
+  unnest_longer(symbol) 
+
+adhesion_genes_signature <- c(
+  "CDH2","CDH3","CDH4","CDH5","CDH15","CD226","CLDN16","CNTN1","CLDN4","CLDN3",
+  "CLDN7","CLDN23","VCAN","CTLA4","CLDN19","ALCAM","NLGN1","NFASC","ICOSLG",
+  "CLDN14","CADM1","CLDN15","NEGR1","NECTIN3","CNTNAP2","CLDN17","GLG1",
+  "CD274","ICOS","HLA-A","HLA-B","HLA-C","HLA-DMA","HLA-DMB","HLA-DOA",
+  "HLA-DOB","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQA2","HLA-DQB1","HLA-DRA",
+  "HLA-DRB1","HLA-DRB3","HLA-DRB4","HLA-DRB5","HLA-E","HLA-F","HLA-G","ICAM1",
+  "ICAM2","ICAM3","ITGA6","ITGA4","ITGA9","ITGAL","ITGAM","ITGAV","ITGB1",
+  "ITGB2","ITGB7","ITGB8","L1CAM","MAG","CD99","MPZ","NCAM1","NCAM2","NEO1",
+  "NRCAM","OCLN","CLDN20","CLDN11","F11R","CLDN18","PDCD1","PECAM1","CLDN22",
+  "NLGN3","NLGN4X","NLGN2","CADM3","PTPRC","PTPRF","PTPRM","PVR","NECTIN1",
+  "NECTIN2","JAM2","SDC1","SDC2","SDC4","SELE","SELL","SELP","SELPLG",
+  "SIGLEC1","SPN","CNTN2","CLDN5","VCAM1","PDCD1LG2","CD276","MADCAM1","JAM3",
+  "CNTNAP1","ITGA8","MPZL1","CLDN10","CLDN8","CLDN6","CLDN2","CLDN1","CLDN9",
+  "ESAM","CD2","CD4","CD6","CD8A","CD8B","CD22","NRXN3","NRXN1","NRXN2","CD28",
+  "CD80","CD86","CD34","CD40","CD40LG","CD58","SDC3","CDH1"
+)
+
+# Import theme_multipanel
+source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100106561c/raw/a0853a1a4e8a46baf33bad6268b09001d49faf51/ggplot_theme_multipanel")
+
+
+  tar_read(gsea, store = "/vast/scratch/users/mangiola.s/doublet_DE/targets")[[1]] |> 
+     unnest(test) |>
+        filter(Description |> str_detect("ADH"))
+
+
+```
+
+```{r Density}
+# Count distribution
+se |> 
+  ggplot(aes(counts_scaled+1, group=scDblFinder.class)) +
+  geom_density(aes(color = scDblFinder.class)) +
+  scale_x_log10()
+```
+
+```{r adjust and PCA, eval=FALSE}
+# Adjust
+se = 
+  se |> 
+  adjust_abundance(.factor_unwanted = "sample_id", .factor_of_interest = "scDblFinder.class", .abundance = counts_scaled)
+
+# se |> saveRDS(here("doublet_DE", "se_adjusted.rds"))
+# se = readRDS(here("doublet_DE", "se_adjusted.rds"))
+
+# PCA
+se |> 
+  
+  keep_variable(.abundance = counts_scaled_adjusted) |> 
+  reduce_dimensions(method = "PCA", .abundance = counts_scaled_adjusted) |> 
+  pivot_sample() |> 
+  left_join(dp) |> 
+  ggplot(aes(PC1, PC2, color = scDblFinder.class, shape = scDblFinder.class)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~dataset_id) +
+  guides(color="none")
+```
+
+Select the biggest dataset
+
+```{r dataset selection}
+
+ se = 
+  se |> 
+  nest(data = -dataset_id) |> 
+  mutate(n_samples = map_int(data, ncol)) |> 
+  filter(n_samples == max(n_samples)) |> 
+  unnest(data)
+
+```
+
+```{r DE}
+
+# library(mirai)
+# daemons(
+#   n = 10,
+#   remote = cluster_config(command = "sbatch")
+# )
+
+
+# se |> saveRDS(here("doublet_DE", "se_adjusted_DE.rds"))
+# se = readRDS(here("doublet_DE", "se_adjusted_DE.rds"))
+
+
+# Check the model
+library(edgeR)
+se |>
+   metadata() %$%
+  tidybulk$edger_robust_likelihood_ratio_object |> 
+    plotBCV()
+```
+
+
+
+```{r volcano}
+
+se |>
+        mutate(symbol = case_when(
+          FDR<0.05 & symbol %in% c(doublet_markers$symbol, adhesion_genes) ~ symbol
+        )) |> 
+        
+        mutate(
+          color_group = case_when(
+            FDR<0.05 & symbol %in% c(doublet_markers$symbol, adhesion_genes) ~ "significant_and_adhesion",
+            FDR<0.05 ~ "significant",
+            TRUE ~ "non-significant"
+          )
+        ) |> 
+        pivot_transcript() |> 
+        
+         ggplot(aes(
+      x = logFC,
+      y = PValue
+    )) +
+  geom_point(aes(
+    color = color_group,
+    size = FDR<0.05,
+    alpha = FDR<0.05
+  )) +
+  ggrepel::geom_text_repel(
+    aes(label = symbol),
+    box.padding = 0.1,
+    size = 2,
+    nudge_y = -0.02,
+    max.overlaps = Inf,
+    segment.size = 0.2,
+    segment.color = "grey50"
+  ) +
+  theme(axis.title.x = element_text(hjust = 0.5)) +
+  scale_x_continuous(
+    name = expression(log[2] ~ "fold change (doublet vs singlet)")
+  ) +
+  tidybulk::scale_y_log10_reverse() +
+  labs(y = expression(-log[10]~"P value")) +
+    scale_color_manual(values = c("significant_and_adhesion" = "#e11f28", "significant" = "#2166ac", "non-significant" = "black"),
+                       guide = "none") +
+  scale_size_manual(values = c(`TRUE` = 0.5, `FALSE` = 0.2)) + 
+  theme_multipanel +
+    theme(axis.title.x = element_text(hjust = 0.5) ,
+          axis.text.x = element_text(size = 5, hjust = 1)) +
+    theme(legend.position = "none") +
+    guides(fill = "none", color = "none")
+   
+# se |> saveRDS(here("doublet_DE", "se_adjusted_DE_GSE.rds"))
+# se = readRDS(here("doublet_DE", "se_adjusted_DE_GSE.rds"))
+```
+
+```{r boxplot}
+
+
+se |> 
+  scale_abundance(method = "TMMwsp") |> 
+  left_join(
+    tibble(
+      .feature = rownames(edger_obj),
+      tagwise_dispersion = edger_obj$tagwise.dispersion,
+      avg_log_CPM = edger_obj$AveLogCPM
+    ), by = ".feature"
+  ) |> 
+  mutate(gate = tidygate::gate(
+    avg_log_CPM, 
+    tagwise_dispersion 
+    #,programmatic_gates = readRDS(here("doublet_DE","tidygate.rds"))
+  )) |> 
+  filter(gate=="1") |> 
+  ggplot(aes(scDblFinder.class, counts_scaled)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter() +
+  scale_y_sqrt() +
+  facet_wrap(~.feature, scale="free_y")
+
+# Filter out high coefficient of variation
+se = 
+  se |> 
+  left_join(
+    tibble(
+      .feature = rownames(edger_obj),
+      tagwise_dispersion = edger_obj$tagwise.dispersion,
+      avg_log_CPM = edger_obj$AveLogCPM
+    ), by = ".feature"
+  ) |> 
+  filter(tagwise_dispersion<1)
+
+rowData(se) = rowData(se)[,1,drop=FALSE]
+
+# Second pass
+se = se |> 
+  
+  keep_abundant(formula_design = ~scDblFinder.class, minimum_count_per_million = 20)  |>
+   test_differential_expression(
+    .formula = ~  scDblFinder.class + sample_id, 
+    scaling_method = "TMMwsp", 
+    test_above_log2_fold_change = 1,
+    method = "edger_robust_likelihood_ratio",
+  
+  ) 
+
+
+
+edger_obj = 
+  se |>
+  metadata() %$%
+  tidybulk$edger_robust_likelihood_ratio_object 
+
+edger_obj |>
+  plotBCV()
+
+se |> 
+  scale_abundance(method = "TMMwsp") |> 
+  filter(FDR<0.05) |> 
+  as_tibble() |> 
+  
+  mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+                                                                 keys = .feature, 
+                                                                 keytype = "ENSEMBL", 
+                                                                 column="SYMBOL", 
+                                                                 multiVals = "first")) |>  
+  filter(symbol |> str_detect("^ITG")) |>
+
+  ggplot(aes(
+    fct_relevel(scDblFinder.class, c("singlet")), counts_scaled, 
+    group = sample_id
+    #,color = sqrt(doublet_proportion)
+  )) +
+  geom_point() +
+  geom_line() +
+  scale_y_sqrt() +
+  scale_color_distiller(palette = "Spectral") +
+  facet_wrap(~symbol) +
+  #theme_multipanel 
+  theme_minimal()
+
+# |> 
+#   mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+#                                         keys = .feature, 
+#                                         keytype = "ENSEMBL", 
+#                                         column="SYMBOL", 
+#                                         multiVals = "first"))
+
+x |> saveRDS(here("doublet_DE", "se_de.rds"))
+
+x |> 
+  filter(FDR<0.01) |> 
+  filter(abs(logFC)>1) |> 
+  pivot_transcript() |> 
+  as_tibble() |> 
+  mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+                                        keys = .feature, 
+                                        keytype = "ENSEMBL", 
+                                        column="SYMBOL", 
+                                        multiVals = "first")) |> 
+  pull(symbol)
+  
+
+
+dp = 
+  x |> 
+  pivot_sample() |>  
+  mutate(doublet_proportion = ncells/sum(ncells), .by = sample_id) |> 
+  filter(scDblFinder.class == "doublet") |> 
+  distinct(sample_id, doublet_proportion)
+
+x |> 
+  scale_abundance(method = "TMMwsp") |> 
+  ggplot(aes(counts_scaled+1, group=scDblFinder.class)) +
+  geom_density(aes(color = scDblFinder.class)) +
+  scale_x_log10()
+
+
+  
+
+x |> 
+  scale_abundance(method = "TMMwsp") |> 
+  filter(FDR<0.05) |> 
+  as_tibble() |> 
+  mutate(symbol = AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db, 
+                                                                 keys = .feature, 
+                                                                 keytype = "ENSEMBL", 
+                                                                 column="SYMBOL", 
+                                                                 multiVals = "first")) |>  
+  filter(symbol |> str_detect("^ITG")) |>
+
+  ggplot(aes(scDblFinder.class, counts_scaled)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(shape = ".") +
+  scale_y_sqrt() +
+  facet_wrap(~symbol, scale="free_y")
+
 ```
 
 
