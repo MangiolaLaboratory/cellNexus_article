@@ -1,4 +1,4 @@
-# cellNexus — companion code
+# cellNexus: Quality control, annotation, aggregation and analytical layers for the Human Cell Atlas data
 
 This repository contains analysis code and workflows accompanying the cellNexus article: a harmonised integration of large-scale human single-cell data with standardised quality control, consistent normalisation, and unified abundance layers (single-cell counts, counts-per-million, normalised expression, and pseudobulk) to support cross-dataset analyses and downstream integration.
 
@@ -6,7 +6,7 @@ This repository contains analysis code and workflows accompanying the cellNexus 
 
 ## Summary
 
-cellNexus aggregates over 40 million human cells, processed with harmonised pipelines so that metadata, QC flags, and expression representations are comparable across studies. This repository holds scripts and notebooks used for figures and supplementary analyses: metadata preparation from Census releases, tissue-level QC landscapes, cell-type consensus mapping, doublet-aware differential expression, sex and ethnicity prediction experiments, and cell–cell communication analyses.
+cellNexus aggregates over 44 million human cells, processed with harmonised pipelines so that metadata, QC flags, and expression representations are comparable across studies. This repository holds scripts and notebooks used for figures and supplementary analyses: metadata preparation from Census releases, tissue-level QC landscapes, cell-type consensus mapping, doublet-aware differential expression, sex and ethnicity prediction experiments, and cell–cell communication analyses.
 
 ---
 
@@ -14,7 +14,7 @@ cellNexus aggregates over 40 million human cells, processed with harmonised pipe
 
 | Path | Description |
 |------|-------------|
-| `metadata/` | Stepwise R scripts (numbered `step1`–`step10`) for CELLxGENE metadata extraction by cellxgenedp, CELLxGENE-Census API data download, large-sample handling, HPCell-based quality control processing, unified metadata, single-cell and pseudobulk local and cloud cache preparation, and API tests against the **cellNexus** R package. |
+| `metadata/` | Stepwise R scripts (numbered `step1`–`step9`) for CELLxGENE metadata extraction by cellxgenedp, CELLxGENE-Census API data download, large-sample handling, HPCell-based quality control processing, unified metadata, single-cell and pseudobulk local and cloud cache preparation, and API tests against the **cellNexus** R package. |
 | `quality_control/` | Quarto report for tissue landscape QC figures. |
 | `cell_typing/` | Quarto notebooks for cell-typing methodology and results (consensus / immune atlas mapping). |
 | `doublet_DE/` | Doublet-aware differential expression and supporting R helpers/themes. |
@@ -24,7 +24,7 @@ cellNexus aggregates over 40 million human cells, processed with harmonised pipe
 | `annotate_harmony_clusters.R` | Harmony cluster annotation utilities. |
 | `tissue_color_utils.R`, `tissue_*.csv` | Shared colour maps and tissue label → macrocategory mappings. |
 
-Paths inside many scripts point to institutional HPC or personal scratch directories. **You must edit those paths** (and optionally Census version pins such as `2024-07-01`) to match your environment before re-running.
+Paths inside many scripts point to institutional HPC or personal scratch directories. **You must edit those paths** to match your environment before re-running.
 
 ---
 
