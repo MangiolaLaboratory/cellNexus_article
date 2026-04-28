@@ -52,41 +52,237 @@ library(caret)
 library(ggpubr)
 library(yardstick)
 library(Seurat)
-library(randomForest)
-library(xgboost)
 library(nnet)
 library(ggalluvial)
 library(ggsci)
 library(patchwork)
+library(edgeR)
+library(DelayedMatrixStats)
+library(cellNexus)
+library(igraph)
+library(bluster)
+```
+
+```{r}
+se <- HDF5Array::loadHDF5SummarizedExperiment("../data/data_10Mar")
+
+rd <- as.data.frame(rowData(se)) %>%
+  rownames_to_column("gene")
+
+ethnicities <- c(
+  "Europeans",
+  "EastAsian",
+  "SouthAsian",
+  "African",
+  "HispanicDLatinAmerican"
+)
+
+top_markers_all <- map(ethnicities, function(eth) {
+
+  est_col <- paste0("Estimate_", eth)
+  se_col  <- paste0("Est.Error_", eth)
+  low_col <- paste0("CI.Lower_", eth)
+  up_col  <- paste0("CI.Upper_", eth)
+  star_col <- paste0("Star_", eth)
+  
+  rd %>%
+    mutate(
+      ethnicity = eth,
+      estimate = .data[[est_col]],
+      std_error = .data[[se_col]],
+      ci_lower = .data[[low_col]],
+      ci_upper = .data[[up_col]],
+      star = if (star_col %in% colnames(.)) .data[[star_col]] else NA,
+      dist0_CI = pmax(ci_lower, 0)
+    ) %>%
+    filter(estimate > 0) %>%
+    arrange(desc(dist0_CI), desc(estimate)) %>%
+    slice_head(n = 200) %>%
+    dplyr::select(
+      ethnicity, gene,
+      estimate, std_error,
+      ci_lower, ci_upper,
+      dist0_CI, star
+    )
+}) %>%
+  bind_rows()
+
+selected_marker_genes <- unique(top_markers_all$gene)
+
+sce_all <- SingleCellExperiment(assay = list("counts" = assay(se, 1),
+                                             "gene_presence" = assay(se, 2),
+                                             "counts_scaled" = assay(se, 3),
+                                             "counts_adjusted_ethnicity" = assay(se, 4)),
+                                colData = colData(se),
+                                rowData = rowData(se))
+
+rowData(sce_all)$is_ethnicity_marker <- rownames(sce_all) %in% selected_marker_genes
+
+sce <- sce_all[selected_marker_genes,]
 ```
 
 
 ```{r}
-sce <- zellkonverter::readH5AD(file = "../data/pseudobulk_sample_for_PCA_adjusted_ethnicity_1_0_6.h5ad", use_hdf5 = TRUE, reader = "R")
+metadata <- get_metadata()
 
-sce <- sce[,sce$ethnicity_groups != "Native American & Pacific Islander"]
+check_eth <- metadata |>
+  dplyr::select(dataset_id, self_reported_ethnicity) %>%
+  as_tibble()
+
+check_eth2 <- metadata |>
+  dplyr::select(dataset_id, sample_id, self_reported_ethnicity, self_reported_ethnicity_ontology_term_id) %>%
+  as_tibble()
+
+chosen_samples <- check_eth2 %>%
+  filter(sample_id %in% sce$sample_id) %>%
+  dplyr::select(c("sample_id","self_reported_ethnicity")) %>%
+  unique()
+
+taxonomy_lookup <- tribble(
+  ~self_reported_ethnicity, ~L1,      ~L2,            ~L3,                         ~Leaf,
+  
+  "unknown",                "World",  "Unknown",      "Unknown",                   "unknown",
+  
+  "African",                "World",  "African",      "Unspecified",               "African",
+  "African American",       "World",  "African",      "Diaspora",                  "African American",
+  "African American or Afro-Caribbean",
+  "World",  "African",      "Diaspora",                  "Afro-Caribbean",
+  
+  "European",               "World",  "European",     "Unspecified",               "European",
+  "European American",      "World",  "European",     "Diaspora",                  "European American",
+  
+  "Finnish",                "World",  "Nordic",       "Unspecified",               "Finnish",
+  
+  "British",                "World",  "CelticEnglish","Unspecified",               "British",
+  "Irish",                  "World",  "CelticEnglish","Unspecified",               "Irish",
+  
+  "Jewish Israeli",         "World",  "Jewish",       "Israel",                    "Israel",
+  
+  
+  "East Asian",             "World",  "EastAsian",    "Unspecified",               "East Asian",
+  "Chinese",                "World",  "EastAsian",    "Chinese",                   "Chinese",
+  "Han Chinese",            "World",  "EastAsian",    "Chinese",                   "Han Chinese",
+  "Singaporean Chinese",    "World",  "EastAsian",    "Chinese diaspora",          "Singaporean Chinese",
+  "Japanese",               "World",  "EastAsian",    "Japan",                     "Japanese",
+  "Korean",                 "World",  "EastAsian",    "Korea",                     "Korean",
+  
+  "South Asian",            "World",  "SouthAsian",   "Unspecified",               "South Asian",
+  "Bangladeshi",            "World",  "SouthAsian",   "Bangladesh",                "Bangladeshi",
+  "Singaporean Indian",     "World",  "SouthAsian",   "Indian diaspora",           "Singaporean Indian",
+  
+  "South East Asian",       "World",  "EastAsian",    "Malay/SEAsia",              "South East Asian",
+  "Singaporean Malay",      "World",  "EastAsian",    "Malay/SEAsia",              "Singaporean Malay",
+  
+  "Hispanic or Latin American",
+  "World",  "Hispanic",     "Spanish/Latin America",     "Hispanic or Latin American",
+  
+  "Iraqi",                  "World",  "Muslim/MENA",  "Arabian Peninsula/MENA",    "Iraqi",
+  "Greater Middle Eastern  (Middle Eastern or North African or Persian)",
+  "World",  "Muslim/MENA",  "MENA/Persian (broad)",      "Greater Middle Eastern",
+  
+  "Oceanian",               "World",  "Oceanian",     "Oceania",                   "Oceanian",
+  "Pacific Islander",       "World",  "Oceanian",     "Pacific Islander",          "Pacific Islander",
+  
+  "Asian",                  "World",  "Asian",        "Unspecified",               "Asian",
+  "American",               "World",  "Americas",     "North America",             "American",
+  
+  "European,Asian",         "World",  "Mixed",        "Europe + Asia",             "European,Asian",
+  "Native American,Hispanic or Latin American",
+  "World",  "Mixed",        "Native + Hispanic",         "Native American + Hispanic"
+)
+
+chosen_samples <- chosen_samples %>%
+  left_join(taxonomy_lookup, by = "self_reported_ethnicity") %>%
+  mutate(
+    L1   = coalesce(L1, "World"),
+    L2   = coalesce(L2, "Other/Unmapped"),
+    L3   = coalesce(L3, "Other/Unmapped"),
+    Leaf = coalesce(Leaf, self_reported_ethnicity)
+  )
+
+```
+
+
+```{r}
+
+unknown_samples <- chosen_samples %>%
+  filter(!L2 %in% c("African","EastAsian","European","Hispanic","SouthAsian"))
+
+chosen_samples <- chosen_samples %>%
+  filter(L2 %in% c("African","EastAsian","European","Hispanic","SouthAsian"))
+
+colnames(sce) <- sce$sample_id
+colnames(sce_all) <- sce_all$sample_id
+
+sce_query <- sce[,sce$sample_id %in% unknown_samples$sample_id]
+sce_query_all <- sce_all[,sce_all$sample_id %in% unknown_samples$sample_id]
+sce_query <- sce_query_all
+
+sce <- sce[,sce$sample_id %in% chosen_samples$sample_id]
+sce_all <- sce_all[,sce_all$sample_id %in% chosen_samples$sample_id]
+
+sce <- sce[,chosen_samples$sample_id]
+sce_all <- sce_all[,chosen_samples$sample_id]
+
+all(colnames(sce) == chosen_samples$sample_id)
+all(colnames(sce_all) == chosen_samples$sample_id)
+
+sce$ethnicity_groups <- chosen_samples$L2
+sce_all$ethnicity_groups <- chosen_samples$L2
+```
+
+
+```{r}
+eth_tissue_heatmap1 <- table(colData(se)[,c("ethnicity_groups","tissue_groups")]) %>%
+  as.matrix() %>%
+  log1p() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t() %>%
+  pheatmap::pheatmap(border_color = "white", cellwidth = 15, cellheight = 15, color = scico::scico(256, direction = -1, palette = "roma"))
+
+eth_tissue_heatmap2 <- table(colData(sce)[,c("ethnicity_groups","tissue_groups")]) %>%
+  as.matrix() %>%
+  log1p() %>%
+  scale() %>%
+  t() %>%
+  scale() %>%
+  t() %>%
+  pheatmap::pheatmap(border_color = "white", cellwidth = 15, cellheight = 15, color = scico::scico(256, direction = -1, palette = "roma"))
 ```
 
 ```{r}
-pca_data <- colData(sce)[,colnames(colData(sce))[startsWith(colnames(colData(sce)), "PC")]]
-umap_data <- colData(sce)[,colnames(colData(sce))[startsWith(colnames(colData(sce)), "UMAP")]]
+#| fig-width: 10
+#| fig-height: 10
+ggplotify::as.ggplot(eth_tissue_heatmap1) + 
+  ggplotify::as.ggplot(eth_tissue_heatmap2) +
+  plot_layout(ncol = 1, widths = c(1,1)) +
+  plot_annotation(tag_levels = "A")
 
-reducedDim(sce, "PCA") <- pca_data
-reducedDim(sce, "UMAP") <- umap_data
+ggsave("../output/ethnicity_tissue_distribution_heatmap.png", width = 10, height = 10, bg = "white")
+```
+
+
+```{r}
+pca <- prcomp(t(assay(sce, "counts_adjusted_ethnicity")), rank. = 30, scale. = TRUE)
+umap <- uwot::tumap(pca$x[,1:10], n_components = 2)
+colnames(umap) <- paste0("UMAP",seq(2))
+
+
+reducedDim(sce, "PCA") <- pca$x
+reducedDim(sce, "UMAP") <- umap
 ```
 
 ```{r}
-npg_cols <- c(ggsci::pal_npg("nrc")(7),"gray40","gray")
+npg_cols <- c(ggsci::pal_npg("nrc")(5),"gray")
 my_colors <- setNames(npg_cols, 
   c("European",
-    "East Asian",
-    "Japanese",
-    "South Asian",
+    "EastAsian",
+    "SouthAsian",
     "African",
-    "Hispanic/Latin American",
-    "Native American & Pacific Islander",
-    "LowConfidenceLabel",
-    "Other/Unknown")
+    "Hispanic",
+    "LowConfidenceLabel")
 )
 ```
 
@@ -164,231 +360,90 @@ ggsave(p_before_batch_correct, file = "../output/umap_original_unadjusted.pdf", 
 
 # assign a confidence score to each sample
 
-## knn graph & clustering
-
-```{r}
-library(bluster)
-library(igraph)
-library(dbscan)
-
-
-set.seed(10)
-g <- makeKNNGraph(pca_data, k = 10, directed = FALSE)
-V(g)$name <- rownames(pca_data)
-```
-
-```{r}
-cr <- cluster_leiden(g, resolution_parameter = 0.01)
-
-sce$clusters <- as.character(membership(cr))
-```
-
-
-```{r}
-#| fig-width: 8
-#| fig-height: 8
-standR::plotDR(sce, dimred = "UMAP", 
-               color = clusters, shape = 16,
-               size = 1.5) +
-  #scale_color_manual(values = my_colors) +
-  theme_ning() +
-  labs(x = "UMAP1", y = "UMAP2") +
-  guides(color=guide_legend(override.aes = list(size = 5), nrow = 3)) +
-  theme(legend.title=element_text(size=17), 
-    legend.text=element_text(size=14))
-```
-
-## calculate entorpy per cluster
-
-For each cluster $C_x$:
-
-1.  Compute the ethnicity label distribution:
-
-$$
-   p_x(\ell) = 
-   \frac{\#\{\,i \in C_x \mid L_i = \ell\,\}}{n_x},
-   \quad
-   \ell \in \{\ell_1, \dots, \ell_6\}.
-$$
-
-2.  Calculate the cluster’s **entropy**:
-
-$$
-   H(C_x)=
-   -\sum_{\ell=1}^{E} p_x(\ell)\,\log\bigl[p_x(\ell)\bigr].
-$$
-
-```{r}
-
-calc_entropy_4clust <- function(labels_vector) {
-  freq <- table(labels_vector)
-  p <- freq / sum(freq)
-  e <- -sum(p * log(p), na.rm = TRUE)
-  
-  return(e)
-}
-
-
-```
-
-```{r}
-df_all <- colData(sce) %>%
-    as.data.frame()
-
-cluster_ids <- unique(df_all$clusters)
-
-results <- data.frame(
-  clusters = cluster_ids,
-  entropy = NA
-)
-
-for (i in seq_along(cluster_ids)){
-  cid <- cluster_ids[i]
-  
-  in_cluster <- which(df_all$clusters == cid)
-  
-  labels_sub <- df_all$ethnicity_groups[in_cluster]
-  
-  H_obs <- calc_entropy_4clust(labels_sub)
-  
-  results$entropy[i] <- H_obs
-}
-```
-
-```{r}
-df_all <- colData(sce) %>%
-    as.data.frame()
-
-cluster_ids <- unique(df_all$clusters)
-
-results_study <- data.frame(
-  clusters = cluster_ids,
-  entropy_study = NA
-)
-
-for (i in seq_along(cluster_ids)){
-  cid <- cluster_ids[i]
-  
-  in_cluster <- which(df_all$clusters == cid)
-  
-  labels_sub <- df_all$dataset_id[in_cluster]
-  
-  H_obs <- calc_entropy_4clust(labels_sub)
-  
-  results_study$entropy_study[i] <- H_obs
-}
-```
-
-```{r}
-sce$entropy <- colData(sce) %>%
-  as.data.frame() %>%
-  left_join(results, by = "clusters") %>%
-  .$entropy
-```
-
-```{r}
-sce$entropy_study <- colData(sce) %>%
-  as.data.frame() %>%
-  left_join(results_study, by = "clusters") %>%
-  .$entropy_study
-```
-
-```{r}
-#| fig-width: 8
-#| fig-height: 7
-standR::plotDR(sce, dimred = "UMAP", 
-               color = entropy,
-               size = 1) +
-  scale_color_gradient(low = "gray", high = "yellow") +
-  theme_ning() +
-  labs(x = "UMAP1", y = "UMAP2")
-```
-
-```{r}
-#| fig-width: 8
-#| fig-height: 7
-standR::plotDR(sce, dimred = "UMAP", 
-               color = entropy_study,
-               size = 0.8) +
-  scale_color_gradient(low = "gray", high = "limegreen") +
-  theme_ning() +
-  labs(x = "UMAP1", y = "UMAP2")
-```
-
 ## local label agreement & final score
 
-Mark cluster $C_x$ as **high-entropy** if its observed entropy is in the upper tail of the null distribution.\
-- Indicator:
-
-$$
-  \gamma_x = 
-     \begin{cases}
-     1 & \text{if $H(C_x)$ >= 0.4},\\
-     0 & \text{otherwise}.
-  \end{cases}
-$$
-
-```{r}
-sce$gamma <- colData(sce) %>% 
-  as.data.frame() %>%
-  mutate(gamma = ifelse(entropy >= 0.4, 1, 0)) %>%
-  .$gamma
-```
+The previous version penalised every sample in a high-entropy cluster equally. In practice that is too blunt: if a branch point and a clean branch are merged into the same cluster, the whole branch can be pushed into the ambiguous class. To avoid that failure mode, we keep the cluster entropy only as a diagnostic and compute the final confidence score from **cell-level neighbourhood structure**.
 
 For **each sample** $i$:
 
-1.  **Local neighbors**: Let $\mathrm{NN}*{k*{\mathrm{local}}}(i)$ be the $k\_{\mathrm{local}}$ nearest neighbors of $i$ in PCA space.
+1.  Find the exact $k_{\mathrm{local}}$ nearest neighbours of $i$ in PCA space.
 
-2.  **Label agreement fraction**:
+2.  Compute the neighbourhood label distribution $p_i(\ell)$.
 
-$$
-   \alpha_i=
-   \frac{\#\{\text{neighbors } j \in \mathrm{NN}_{k_{\mathrm{local}}}(i) : L_j = L_i\}}
-        {k_{\mathrm{local}}}.
-$$
-
-This yields $\alpha_i \in [0,1]$.
-
-3.  **Penalty for high-entropy cluster**: Suppose sample $i$ belongs to cluster $x$. Incorporate a penalty factor if the cluster is flagged:
+3.  Define:
 
 $$
-   \mathrm{score}_i = 
-   \alpha_i 
-   \,\times\, 
-   \bigl( 1 - \lambda \cdot \gamma_x \bigr).
+   \alpha_i = p_i(L_i)
 $$
 
--   If $C_c$ is **low entropy** $(\gamma_c=0)$, then $\mathrm{score}_i = \alpha_i$.
--   If $C_c$ is **high entropy** $(\gamma_c=1)$, then $\mathrm{score}_i = \alpha_i \times (1 - \lambda)$.
+as the local purity for the sample's assigned label, and
 
-Here, $k_{\mathrm{local}}$ is set to 5 and $\lambda$ is set to 0.5
+$$
+   m_i = \alpha_i - \max_{\ell \neq L_i} p_i(\ell)
+$$
+
+as the local margin over the strongest competing label.
+
+4.  Use the final confidence score
+
+$$
+   \mathrm{score}_i = \alpha_i \times \frac{1 + m_i}{2}.
+$$
+
+This keeps coherent branches high-confidence when their local neighbourhood is pure, while only the branch junction and other locally mixed regions become ambiguous.
 
 ```{r}
 set.seed(10)
 
+pca_data <- pca$x
 df <- colData(sce) %>% as.data.frame()
-lambda <- 0.5
-k_local <- 5
-g_local <- makeKNNGraph(pca_data, k = k_local, directed = FALSE)
+k_local <- 15
+knn_res <- BiocNeighbors::findKNN(pca_data, k = k_local)
+nn_index <- knn_res$index
+label_levels <- sort(unique(as.character(df$ethnicity_groups)))
 
-scores <- numeric(nrow(pca_data))
+calc_local_label_score <- function(label_i, neighbor_labels, label_levels) {
+  label_i <- as.character(label_i)
+  prob_tbl <- table(factor(neighbor_labels, levels = label_levels))
+  probs <- as.numeric(prob_tbl) / sum(prob_tbl)
+  names(probs) <- label_levels
 
-for(i in seq_len(nrow(pca_data))) {
-  nn_ids <- neighbors(g_local, i) 
-  nn_ids <- as.integer(nn_ids)
+  alpha_i <- unname(probs[label_i])
+  other_probs <- probs[names(probs) != label_i]
+  runner_up <- if (length(other_probs)) max(other_probs) else 0
+  margin_i <- alpha_i - runner_up
 
-  label_i <- df$ethnicity_groups[i]
-  neighbor_labels <- df$ethnicity_groups[nn_ids]
-  same_count <- sum(neighbor_labels == label_i)
-  alpha_i <- same_count / length(nn_ids)
+  score_i <- alpha_i * ((margin_i + 1) / 2)
 
-  gamma_i <- df$gamma[i]
-
-  scores[i] <- alpha_i * (1 - lambda * gamma_i)
+  tibble(
+    alpha = alpha_i,
+    runner_up = runner_up,
+    margin = margin_i,
+    score = score_i
+  )
 }
 
-df$score <- scores
-colData(sce)$score <- scores
+local_stats <- vector("list", nrow(pca_data))
+
+for (i in seq_len(nrow(pca_data))) {
+  nn_ids <- nn_index[i, ]
+  neighbor_labels <- as.character(df$ethnicity_groups[nn_ids])
+  local_stats[[i]] <- calc_local_label_score(
+    label_i = df$ethnicity_groups[i],
+    neighbor_labels = neighbor_labels,
+    label_levels = label_levels
+  )
+}
+
+local_stats <- bind_rows(local_stats)
+
+df <- bind_cols(df, local_stats)
+colData(sce)$alpha <- df$alpha
+colData(sce)$runner_up <- df$runner_up
+colData(sce)$margin <- df$margin
+colData(sce)$local_entropy <- df$local_entropy
+colData(sce)$local_entropy_norm <- df$local_entropy_norm
+colData(sce)$score <- df$score
 ```
 
 ```{r}
@@ -420,14 +475,152 @@ p_scoring_umap
 ggsave(p_scoring_umap, file = "../output/umap_score.pdf", width = 8, height = 7)
 ```
 
+
+
 ## outputing relabels.
 
 ```{r}
+confidence_threshold <- 0.55
+
 sce$ethnicity_relabel <- colData(sce) %>%
   as.data.frame() %>%
-  mutate(ethnicity_relabel = ifelse(score > 0.9, as.character(ethnicity_groups), "LowConfidenceLabel")) %>%
+  mutate(ethnicity_relabel = ifelse(score >= confidence_threshold, as.character(ethnicity_groups), "LowConfidenceLabel")) %>%
   .$ethnicity_relabel
+
+colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(c("sample_id", "ethnicity_relabel")) %>% 
+  mutate(Filter = ifelse(ethnicity_relabel == "LowConfidenceLabel", TRUE, FALSE)) %>%
+  write_csv("../output/sample_filtering_based_on_ethnicity_clearness.csv")
 ```
+
+
+
+
+```{r}
+#| fig-width: 9
+#| fig-height: 9
+standR::plotDR(sce, dimred = "UMAP", 
+               color = ethnicity_relabel, shape = 16,
+               size = .8) +
+  scale_color_manual(values = my_colors, name = "ethnicity_groups") +
+  theme_ning() +
+  labs(x = "UMAP1", y = "UMAP2") +
+  guides(color=guide_legend(override.aes = list(size = 5), nrow = 4)) +
+  theme(legend.title=element_text(size=17), 
+    legend.text=element_text(size=14))
+```
+
+```{r}
+sce$UMAP1 <- reducedDim(sce, "UMAP")[,"UMAP1"]
+sce$UMAP2 <- reducedDim(sce, "UMAP")[,"UMAP2"]
+
+
+colData(sce) %>% as.data.frame() %>% filter(ethnicity_relabel == "EastAsian") %>% filter(UMAP1 < 2) %>% rownames()
+colData(sce) %>% as.data.frame() %>% filter(ethnicity_relabel == "European") %>% filter(UMAP1 > 7) %>% rownames()
+```
+
+```{r}
+samples2check <- c(colData(sce) %>% as.data.frame() %>% filter(ethnicity_relabel == "EastAsian") %>% filter(UMAP1 < 2) %>% rownames() %>% head(n=2), 
+                   colData(sce) %>% as.data.frame() %>% filter(ethnicity_relabel == "European") %>% filter(UMAP1 > 7) %>% rownames() %>% head(n = 2))
+```
+
+```{r}
+samples2check_df <- reducedDim(sce, "UMAP")[samples2check,] %>%
+  cbind(colData(sce) %>% 
+          as.data.frame() %>% 
+          .[samples2check,]) %>%
+  as.data.frame() %>%
+  dplyr::select(c("sample_id","UMAP1","UMAP2","ethnicity_relabel","ethnicity_groups"))
+```
+
+6 suspicious samples are selected.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 9
+p_sus1 <- standR::plotDR(sce, dimred = "UMAP", 
+               color = ethnicity_relabel, shape = 16,
+               size = .8) +
+  scale_color_manual(values = my_colors, name = "ethnicity_groups") +
+  geom_point(data = samples2check_df, aes(x = UMAP1, y = UMAP2), color = "black", shape = 1, size = 2) +
+  ggrepel::geom_label_repel(data = samples2check_df, aes(x = UMAP1, y = UMAP2, label = ethnicity_relabel)) + 
+  theme_ning() +
+  labs(x = "UMAP1", y = "UMAP2") +
+  guides(color=guide_legend(override.aes = list(size = 5), nrow = 2)) +
+  theme(legend.title=element_text(size=17), 
+    legend.text=element_text(size=14))
+
+p_sus1
+
+ggsave("../output/sus_case_umap.png", width = 11, height = 11, bg = "white")
+```
+
+```{r}
+set.seed(10)
+g <- makeKNNGraph(pca_data, k = 10, directed = FALSE)
+V(g)$name <- rownames(pca_data)
+
+dfl <- list()
+
+for(i in samples2check){
+  v_index <- which(V(g)$name == i)
+  node_neighbors <- neighbors(g, v_index)
+  neighbor_names <- V(g)$name[node_neighbors]
+  df1 <- data.frame(target = i,
+            sampleID = c(i,neighbor_names))
+  
+  dfl[[i]] <- df1
+}
+```
+
+
+```{r}
+plot_list <- lapply(dfl, function(x){
+  as.data.frame(colData(sce[,x$sampleID])) %>%
+    rownames_to_column("sampleID") %>%
+    left_join(x) %>%
+    ggplot(aes(UMAP1, UMAP2, color = ethnicity_groups)) +
+    geom_point(data = as.data.frame(colData(sce)), aes(UMAP1, UMAP2), color = "gray", size = 0.1) +
+    geom_point(size = 2.5) +
+    geom_point(data = samples2check_df %>% 
+                 filter(sample_id == unique(x$target)), 
+               aes(UMAP1, UMAP2), color = "black", shape = 1, size = 2.5) +
+    scale_color_manual(values = my_colors, name = "ethnicity_groups") +
+    theme_ning() +
+    labs(x = "UMAP1", y = "UMAP2") +
+    guides(color=guide_legend(override.aes = list(size = 5), nrow = 1)) +
+    theme(legend.title=element_text(size=12), 
+      legend.text=element_text(size=11)) +
+    theme(legend.position = "none")
+})
+```
+
+We can see the neighbors of each sample are of the same colors, indicating the same ethnicity, so they should high confidence, consistent with scoring algorithm. The misplacement on the UMAP space is just because it's not a linear transformation.
+
+Red circles are the 6 suspicious samples.
+
+```{r}
+#| fig-width: 15
+#| fig-height: 11
+p_sus2 <- ggpubr::ggarrange(plotlist = plot_list)
+p_sus2 <- annotate_figure(p_sus2, top = text_grob("Visualise neighbors of specific samples with the kNN-Graph", 
+               color = "black", face = "bold", size = 15))
+
+p_sus2
+
+ggsave("../output/sus_case_umap_knn_highlight.png", width = 15, height = 11, bg = "white")
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 13
+p_sus1 + p_sus2 + plot_layout(ncol = 1, heights = c(1,1)) + plot_annotation(tag_levels = "A")
+
+ggsave("../output/suspicous_sample_qc_umaps.png", width = 7, height = 13, bg = "white")
+```
+
 
 Here we plot without the low confidence label samples.
 
@@ -455,32 +648,64 @@ p_onlyhighscore
 ggsave(p_onlyhighscore, file = "../output/UMAP_highConfidence.pdf", width = 8, height = 7)
 ```
 
+```{r}
+transfer_cols <- c(
+  "ethnicity_groups",
+  "clusters",
+  "entropy",
+  "entropy_study",
+  "alpha",
+  "runner_up",
+  "margin",
+  "local_entropy",
+  "local_entropy_norm",
+  "score",
+  "ethnicity_relabel"
+)
+
+for (col_nm in transfer_cols) {
+  colData(sce_all)[[col_nm]] <- colData(sce)[[col_nm]][match(colnames(sce_all), colnames(sce))]
+}
+
+add_training_assays <- function(sce_obj) {
+  raw_counts <- as.matrix(assay(sce_obj, "counts"))
+
+  assay(sce_obj, "logcounts") <- edgeR::cpm(raw_counts, log = TRUE)
+
+  sce_tmm <- sce_obj %>%
+    tidybulk::scale_abundance(method = "TMM", suffix = "_tmm")
+
+  if (!"counts_tmm" %in% assayNames(sce_tmm)) {
+    stop("counts_tmm assay was not created by tidybulk::scale_abundance().")
+  }
+
+  counts_tmm <- as.matrix(assay(sce_tmm, "counts_tmm"))
+
+  assay(sce_obj, "counts_tmm") <- counts_tmm
+  assay(sce_obj, "logcounts_tmm") <- log1p(counts_tmm)
+  assay(sce_obj, "cpm_tmm_logcounts") <- edgeR::cpm(counts_tmm, log = TRUE)
+
+  sce_obj
+}
+
+sce_all <- add_training_assays(sce_all)
+sce_query_all <- add_training_assays(sce_query_all)
+```
+
 
 # output h5ad
 
 ```{r}
-zellkonverter::writeH5AD(sce, file = "../data/sce_relabel.h5ad", compression = "gzip")
-```
+zellkonverter::writeH5AD(sce_all, file = "../data/sce_relabel.h5ad", compression = "gzip")
 
-```{r}
-sce <- zellkonverter::readH5AD(file = "../data/sce_relabel.h5ad", use_hdf5 = TRUE, reader = "R")
-
-pca_data <- colData(sce)[,colnames(colData(sce))[startsWith(colnames(colData(sce)), "PC")]]
-umap_data <- colData(sce)[,colnames(colData(sce))[startsWith(colnames(colData(sce)), "UMAP")]]
-
-reducedDim(sce, "PCA") <- pca_data
-reducedDim(sce, "UMAP") <- umap_data
+sce <- zellkonverter::readH5AD("../data/sce_relabel.h5ad")
 ```
 
 ```{r}
 sce_ref <- sce[,sce$ethnicity_relabel!="LowConfidenceLabel"]
 ```
 
-
 ```{r}
-sce_query <- zellkonverter::readH5AD(file = "../data/pseudobulk_sample_for_PCA_adjusted_ethnicity_unknown_ethnicity_1_0_6.h5ad", 
-                                     use_hdf5 = TRUE, reader = "R")
-
 sce_l <- sce[, sce$ethnicity_relabel == "LowConfidenceLabel"]
 ```
 
@@ -488,10 +713,7 @@ sce_l <- sce[, sce$ethnicity_relabel == "LowConfidenceLabel"]
 sce_query
 ```
 
-
 ```{r}
-sce_query <- sce_query[rownames(sce_l),]
-
 intersect_cols <- intersect(colnames(colData(sce_l)),
                             colnames(colData(sce_query)))
 ```
@@ -505,17 +727,17 @@ cold_merge_query <- colData(sce_l)[,intersect_cols] %>%
 
 ```{r}
 sce_query <- SingleCellExperiment(assay = list("counts" = 
-                                               cbind(assay(sce_l,1),
-                                                     assay(sce_query,1)),
+                                               cbind(as.data.frame(assay(sce_l,"counts")),
+                                                     as.data.frame(assay(sce_query,"counts"))),
                                              "counts_adjusted_ethnicity" = 
-                                               cbind(assay(sce_l,2),
-                                                     assay(sce_query,2)),
+                                               cbind(as.data.frame(assay(sce_l,"counts_adjusted_ethnicity")),
+                                                     as.data.frame(assay(sce_query,"counts_adjusted_ethnicity"))),
                                              "counts_scaled" = 
-                                               cbind(assay(sce_l,3),
-                                                     assay(sce_query,3)),
+                                               cbind(as.data.frame(assay(sce_l,"counts_scaled")),
+                                                     as.data.frame(assay(sce_query,"counts_scaled"))),
                                              "gene_presence" = 
-                                               cbind(assay(sce_l,4),
-                                                     assay(sce_query,4))),
+                                               cbind(as.data.frame(assay(sce_l,"gene_presence")),
+                                                     as.data.frame(assay(sce_query,"gene_presence")))),
                                 colData = cold_merge_query)
 
 seu_query <- CreateSeuratObject(counts = as.matrix(assay(sce_query, "counts")),
@@ -525,25 +747,20 @@ seu_query@assays$RNA$data <- as.matrix(assay(sce_query, "counts_adjusted_ethnici
 ```
 
 ```{r}
-set.seed(114514)
+set.seed(42)
 
-df_query <- assay(sce_query, "counts_adjusted_ethnicity") %>%
-  as.data.frame() %>%
-  rownames_to_column("feature") %>%
-  pivot_longer(-feature, names_to = "sample", values_to = "counts_adjusted_ethnicity") %>%
-  dplyr::select(c("sample","feature","counts_adjusted_ethnicity")) %>%
-  as_tibble() %>%
-  tidybulk::reduce_dimensions(.element = sample, .feature = feature, method = "PCA", .abundance = counts_adjusted_ethnicity, .dims = 30) %>%
-  tidybulk::reduce_dimensions(.element = sample, .feature = feature, method = "UMAP", .abundance = counts_adjusted_ethnicity, 
-                              pca = 10, .dims = 2, calculate_for_pca_dimensions = NULL) %>%
-  dplyr::select(-c(feature,counts_adjusted_ethnicity)) %>%
-  unique()
+pca_q <- prcomp(t(assay(sce_query, "counts_adjusted_ethnicity")), rank. = 30, scale. = TRUE)
+umap_q <- uwot::tumap(pca_q$x[,1:10], n_components = 2)
+colnames(umap_q) <- paste0("UMAP",seq(2))
+
+reducedDim(sce_query, "PCA") <- pca_q$x
+reducedDim(sce_query, "UMAP") <- umap_q
 ```
 
 ```{r}
-p_query_umap <- df_query %>%
-  ggplot(aes(UMAP1, UMAP2)) +
-  geom_point(color = "black", shape = 16, size = 1) +
+p_query_umap <- standR::plotDR(sce_query, dimred = "UMAP", 
+               color = "black", shape = 16,
+               size = 1) +
   theme_void() +
   theme(panel.border = element_rect(color = "black", fill = NA, size = 2),
         plot.margin = unit(c(10,10,10,10), "pt"))
@@ -553,613 +770,1136 @@ p_query_umap
 ggsave(p_query_umap, file = "../output/UMAP_query.pdf", width = 8, height = 7)
 ```
 
-```{r}
-pca_data_q <- df_query[startsWith(colnames(df_query),"PC")]
-umap_data_q <- df_query[startsWith(colnames(df_query),"UMAP")]
-
-reducedDim(sce_query, "PCA") <- pca_data_q
-reducedDim(sce_query, "UMAP") <- umap_data_q
-```
-
 
 ```{r}
-zellkonverter::writeH5AD(sce_query, file = "../data/sce_query.h5ad", compression = "gzip")
+zellkonverter::writeH5AD(sce_query_all, file = "../data/sce_query.h5ad", compression = "gzip")
+
+sce_query <- zellkonverter::readH5AD(file = "../data/sce_query.h5ad")
 ```
 
-Now need to run the MLP in python environment
+Now need to run the Classifier_benchmark.ipynb file
 
+# Benchmarking prediction methods 
 
-# Prediction methods assessment
-
-## label transfer
+## Seurat label transfer
 
 ```{r}
 sce_ref <- sce[, sce$ethnicity_relabel != "LowConfidenceLabel"]
-
-assay(sce_ref, "logcounts") <- as.matrix(assay(sce_ref, "counts_adjusted_ethnicity"))
+assay(sce_ref, "logcounts") <- as.matrix(assay(sce_ref, "logcounts"))
 assay(sce_ref, "counts") <- as.matrix(assay(sce_ref, "counts"))
-
-reducedDimNames(sce_ref) <- c("pca", "umap")
-
 seu_ref <- as.Seurat(sce_ref)
-```
-
-```{r}
-set.seed(52)
-folds <- createFolds(seu_ref$ethnicity_relabel, k = 10, list = TRUE, returnTrain = FALSE)
-
-all_true <- c()
-all_preds <- c()
-```
-
-
-```{r}
-levels_order <- c("African", "East Asian", "European", "Hispanic/Latin American", 
-                  "Japanese", "South Asian")
-
+levels_order <- unique(sce_ref$ethnicity_relabel)
 clean_levels <- make.names(levels_order, unique = TRUE)
-
 clean_to_ori_name <- levels_order
 names(clean_to_ori_name) <- clean_levels
-```
-
-```{r}
-
-seu_ref$ethnicity_clean <- factor(
-  seu_ref$ethnicity_relabel,
-  levels = levels_order,
-  labels = clean_levels
+seu_ref$ethnicity_clean <- factor(seu_ref$ethnicity_relabel, levels = levels_order, labels = clean_levels)
+split_seed <- 52
+n_folds <- 5
+benchmark_recipe_names <- c(
+  "LogCPMScale",
+  "LogCPMPCA",
+  "Log1pTMMScale",
+  "Log1pTMMPCA",
+  "LogCPM_TMMScale",
+  "LogCPM_TMMPCA"
+)
+selected_models <- c(
+  as.vector(t(outer(c("HistGBDT", "LinearSVM", "LogReg", "MLP", "RandomForest"), benchmark_recipe_names, paste, sep = "__"))),
+  "RandomForestRank__LogCPMRank"
 )
 ```
 
 ```{r}
-#| message: false
+build_group_holdout_folds <- function(meta_df, group_col, k = 5, seed = 52, protected_groups = character()) {
+  set.seed(seed)
 
-set.seed(52)
-folds <- createFolds(seu_ref$ethnicity_clean, k = 10, list = TRUE, returnTrain = FALSE)
+  if (!group_col %in% colnames(meta_df)) {
+    stop(group_col, " is required in meta_df.")
+  }
 
-lt_probs_list <- vector("list", length(folds))
+  df <- meta_df %>%
+    filter(!is.na(.data[[group_col]]), !is.na(ethnicity)) %>%
+    transmute(
+      holdout_group = as.character(.data[[group_col]]),
+      ethnicity = as.character(ethnicity)
+    )
 
-for (i in seq_along(folds)) {
-  cat("Fold", i, "\n")
-  test_i  <- folds[[i]]
-  train_i <- setdiff(seq_len(ncol(seu_ref)), test_i)
+  all_ethnicities <- sort(unique(df$ethnicity))
 
-  seu_train <- seu_ref[, train_i]
-  seu_test  <- seu_ref[, test_i]
+  group_stats <- df %>%
+    dplyr::count(holdout_group, ethnicity, name = "n") %>%
+    pivot_wider(names_from = ethnicity, values_from = n, values_fill = 0)
 
-  seu_train <- FindVariableFeatures(seu_train, nfeatures = nrow(seu_train)) %>%
-               ScaleData() %>%
-               RunPCA(verbose = FALSE)
-  seu_test  <- FindVariableFeatures(seu_test, nfeatures = nrow(seu_test)) %>%
-               ScaleData() %>%
-               RunPCA(verbose = FALSE)
+  group_sizes <- df %>%
+    dplyr::count(holdout_group, name = "n_samples")
 
-  anchors     <- FindTransferAnchors(reference = seu_train,
-                                     query     = seu_test,
-                                     dims      = 1:20,
-                                     reference.reduction = "pca")
-  predictions <- TransferData(anchorset = anchors,
-                              refdata   = seu_train$ethnicity_clean,
-                              dims      = 1:20)
-  
-  true_labels <- seu_test$ethnicity_relabel
-  pred_labels <- predictions$predicted.id
-  
-  all_true <- c(all_true, as.character(true_labels))
-  all_preds <- c(all_preds, as.character(pred_labels))
-  
-  ## Pull out just the per‐class score columns
-  score_cols <- grep("^prediction\\.score\\.", colnames(predictions), value = TRUE)
-  lt_prob <- predictions[, score_cols] %>%
-    as_tibble() %>%
-    # remove the prefix so columns = clean_levels
-    rename_with(~ sub("^prediction\\.score\\.", "", .x)) %>%
-    mutate(
-      truth = seu_test$ethnicity_clean,
-      fold  = i,
+  group_stats <- group_sizes %>%
+    left_join(group_stats, by = "holdout_group")
+
+  class_group_counts <- colSums(as.matrix(group_stats[, all_ethnicities, drop = FALSE]) > 0)
+
+  coverage_list <- setNames(
+    lapply(seq_len(nrow(group_stats)), function(i) {
+      all_ethnicities[as.numeric(group_stats[i, all_ethnicities, drop = TRUE]) > 0]
+    }),
+    group_stats$holdout_group
+  )
+
+  group_names <- group_stats$holdout_group
+  protected_lookup <- tolower(protected_groups)
+  candidate_group_names <- group_names[!tolower(group_names) %in% protected_lookup]
+  total_samples <- sum(group_stats$n_samples)
+  target_test_n <- ceiling(total_samples / k)
+  usage_counts <- setNames(integer(length(group_names)), group_names)
+  folds <- vector("list", k)
+  heldout_groups <- vector("list", k)
+
+  for (i in seq_len(k)) {
+    selected <- character()
+    covered <- character()
+    current_n <- 0
+
+    repeat {
+      remaining_ethnicities <- setdiff(all_ethnicities, covered)
+      candidates <- setdiff(candidate_group_names, selected)
+
+      if (!length(remaining_ethnicities) && current_n >= target_test_n) {
+        break
+      }
+      if (!length(candidates)) {
+        break
+      }
+
+      candidate_tbl <- tibble(holdout_group = candidates) %>%
+        mutate(
+          gain = map_int(holdout_group, ~ sum(remaining_ethnicities %in% coverage_list[[.x]])),
+          rarity_gain = map_dbl(holdout_group, function(grp) {
+            gained <- intersect(remaining_ethnicities, coverage_list[[grp]])
+            if (!length(gained)) {
+              return(0)
+            }
+            sum(1 / class_group_counts[gained])
+          }),
+          keeps_train_cover = map_lgl(holdout_group, function(grp) {
+            train_groups <- setdiff(group_names, c(selected, grp))
+            train_cover <- unique(unlist(coverage_list[train_groups]))
+            all(all_ethnicities %in% train_cover)
+          }),
+          usage = usage_counts[holdout_group],
+          n_samples = group_stats$n_samples[match(holdout_group, group_names)],
+          size_gap = abs((current_n + n_samples) - target_test_n),
+          tie_break = runif(n())
+        ) %>%
+        filter(keeps_train_cover)
+
+      if (!nrow(candidate_tbl)) {
+        break
+      }
+
+      if (length(remaining_ethnicities)) {
+        candidate_tbl <- candidate_tbl %>% arrange(desc(gain), desc(rarity_gain), usage, size_gap, tie_break)
+      } else {
+        candidate_tbl <- candidate_tbl %>% arrange(usage, size_gap, desc(rarity_gain), tie_break)
+      }
+
+      chosen <- candidate_tbl$holdout_group[1]
+      selected <- c(selected, chosen)
+      covered <- union(covered, coverage_list[[chosen]])
+      current_n <- current_n + group_stats$n_samples[match(chosen, group_names)]
+      usage_counts[chosen] <- usage_counts[chosen] + 1L
+    }
+
+    train_groups <- setdiff(group_names, selected)
+    train_cover <- unique(unlist(coverage_list[train_groups]))
+
+    folds[[i]] <- which(as.character(meta_df[[group_col]]) %in% selected)
+    heldout_groups[[i]] <- selected
+  }
+
+  names(folds) <- paste0("Fold", seq_len(k))
+  attr(folds, "heldout_groups") <- heldout_groups
+  folds
+}
+
+make_split_plan <- function(seu_obj, group_col, k = 5, seed = 52) {
+  group_values <- as.character(seu_obj@meta.data[[group_col]])
+  fold_meta <- tibble(
+    sample_id = colnames(seu_obj),
+    ethnicity = as.character(seu_obj$ethnicity_clean),
+    group_value = group_values
+  )
+  colnames(fold_meta)[colnames(fold_meta) == "group_value"] <- group_col
+
+  protected_groups <- if (identical(group_col, "tissue_groups")) "blood" else character()
+
+  folds <- build_group_holdout_folds(
+    fold_meta,
+    group_col = group_col,
+    k = k,
+    seed = seed,
+    protected_groups = protected_groups
+  )
+
+  for (i in seq_along(folds)) {
+    test_i <- folds[[i]]
+    train_i <- setdiff(seq_len(ncol(seu_obj)), test_i)
+    stopifnot(length(intersect(unique(group_values[test_i]), unique(group_values[train_i]))) == 0)
+    stopifnot(all(clean_levels %in% unique(as.character(seu_obj$ethnicity_clean[test_i]))))
+    stopifnot(all(clean_levels %in% unique(as.character(seu_obj$ethnicity_clean[train_i]))))
+  }
+
+  list(
+    group_col = group_col,
+    folds = folds,
+    heldout_groups = attr(folds, "heldout_groups"),
+    group_values = group_values
+  )
+}
+
+split_plan_list <- list(
+  dataset_id = make_split_plan(seu_ref, group_col = "dataset_id", k = n_folds, seed = split_seed),
+  tissue_groups = make_split_plan(seu_ref, group_col = "tissue_groups", k = n_folds, seed = split_seed)
+)
+
+folds <- split_plan_list$dataset_id$folds
+heldout_dataset_list <- split_plan_list$dataset_id$heldout_groups
+groups <- split_plan_list$dataset_id$group_values
+```
+
+```{r}
+cv_split_group_df <- imap_dfr(
+  split_plan_list,
+  function(plan, split_scheme) {
+    map2_dfr(
+      plan$folds,
+      seq_along(plan$folds),
+      ~ {
+        test_i <- .x
+        train_i <- setdiff(seq_len(ncol(seu_ref)), test_i)
+
+        bind_rows(
+          tibble(
+            split_scheme = split_scheme,
+            fold = .y,
+            split = "Train",
+            holdout_group = plan$group_values[train_i]
+          ),
+          tibble(
+            split_scheme = split_scheme,
+            fold = .y,
+            split = "Test",
+            holdout_group = plan$group_values[test_i]
+          )
+        )
+      }
+    )
+  }
+) %>%
+  dplyr::count(split_scheme, fold, split, holdout_group, name = "n_samples") %>%
+  group_by(split_scheme, fold, split) %>%
+  mutate(prop_samples = n_samples / sum(n_samples)) %>%
+  ungroup()
+
+cv_split_group_df
+
+holdout_group_order <- cv_split_group_df %>%
+  group_by(split_scheme, holdout_group) %>%
+  summarise(n_total = sum(n_samples), .groups = "drop") %>%
+  arrange(split_scheme, desc(n_total))
+
+cv_split_group_plot_df <- cv_split_group_df %>%
+  left_join(holdout_group_order, by = c("split_scheme", "holdout_group")) %>%
+  group_by(split_scheme) %>%
+  mutate(holdout_group = factor(holdout_group, levels = rev(unique(holdout_group[order(n_total)])))) %>%
+  ungroup()
+
+ggplot(cv_split_group_plot_df %>% filter(split_scheme == "dataset_id"), aes(x = factor(fold), y = holdout_group, fill = prop_samples)) +
+  geom_tile(color = "white") +
+  facet_wrap(~ split, scales = "free_y", nrow = 1) +
+  scale_fill_viridis_c(labels = scales::percent_format(accuracy = 1)) +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  labs(
+    x = "Cross-validation fold",
+    y = "Studies",
+    fill = "Within-split proportion",
+    title = "Train/test group composition across held-out folds"
+  )
+
+ggsave("../output/study_held_out_distribution_check.pdf", width = 7, height = 7, bg = "white")
+
+cv_split_ethnicity_df <- imap_dfr(
+  split_plan_list,
+  function(plan, split_scheme) {
+    map2_dfr(
+      plan$folds,
+      seq_along(plan$folds),
+      ~ {
+        test_i <- .x
+        train_i <- setdiff(seq_len(ncol(seu_ref)), test_i)
+
+        bind_rows(
+          tibble(
+            split_scheme = split_scheme,
+            fold = .y,
+            split = "Train",
+            ethnicity = as.character(seu_ref$ethnicity_relabel[train_i])
+          ),
+          tibble(
+            split_scheme = split_scheme,
+            fold = .y,
+            split = "Test",
+            ethnicity = as.character(seu_ref$ethnicity_relabel[test_i])
+          )
+        )
+      }
+    )
+  }
+) %>%
+  dplyr::count(split_scheme, fold, split, ethnicity, name = "n_samples") %>%
+  group_by(split_scheme, fold, split) %>%
+  mutate(prop_samples = n_samples / sum(n_samples)) %>%
+  ungroup()
+
+ggplot(cv_split_ethnicity_df %>% filter(split_scheme == "dataset_id"), aes(x = factor(fold), y = prop_samples, fill = ethnicity)) +
+  geom_col(color = "white") +
+  facet_wrap( ~ split) +
+  scale_fill_manual(values = my_colors[names(my_colors) %in% unique(cv_split_ethnicity_df$ethnicity)]) +
+  theme_classic() +
+  labs(
+    x = "Cross-validation fold",
+    y = "Proportion of samples",
+    fill = "Ethnicity",
+    title = "Train/test ethnicity composition across held-out folds"
+  )
+
+ggsave("../output/study_held_out_ethnicity_distribution_check.pdf", width = 9, height = 5, bg = "white")
+```
+
+```{r}
+sample_expression_values <- function(sce_obj, assay_name, sample_set, display_name, split_scheme, fold, n_values = 25000, transform_fn = identity) {
+  vals <- as.numeric(assay(sce_obj, assay_name))
+  vals <- vals[is.finite(vals)]
+
+  if (length(vals) > n_values) {
+    vals <- sample(vals, size = n_values)
+  }
+
+  tibble(
+    split_scheme = split_scheme,
+    fold = factor(fold, levels = seq_len(n_folds), labels = paste("Fold", seq_len(n_folds))),
+    sample_set = sample_set,
+    assay = display_name,
+    value = transform_fn(vals)
+  )
+}
+
+set.seed(split_seed)
+
+labeltransfer_expr_qc_df <- imap_dfr(
+  split_plan_list,
+  function(plan, split_scheme) {
+    map2_dfr(
+      plan$folds,
+      seq_along(plan$folds),
+      ~ {
+        test_i <- .x
+        train_i <- setdiff(seq_len(ncol(sce_ref)), test_i)
+
+        bind_rows(
+          sample_expression_values(sce_ref[, train_i], "counts", "Training", "log1p(counts)", split_scheme, .y, transform_fn = log1p),
+          sample_expression_values(sce_ref[, test_i], "counts", "Test", "log1p(counts)", split_scheme, .y, transform_fn = log1p),
+          sample_expression_values(sce_query, "counts", "Query", "log1p(counts)", split_scheme, .y, transform_fn = log1p),
+          sample_expression_values(sce_ref[, train_i], "logcounts", "Training", "logCPM", split_scheme, .y),
+          sample_expression_values(sce_ref[, test_i], "logcounts", "Test", "logCPM", split_scheme, .y),
+          sample_expression_values(sce_query, "logcounts", "Query", "logCPM", split_scheme, .y),
+          sample_expression_values(sce_ref[, train_i], "logcounts_tmm", "Training", "log1pTMM", split_scheme, .y),
+          sample_expression_values(sce_ref[, test_i], "logcounts_tmm", "Test", "log1pTMM", split_scheme, .y),
+          sample_expression_values(sce_query, "logcounts_tmm", "Query", "log1pTMM", split_scheme, .y),
+          sample_expression_values(sce_ref[, train_i], "cpm_tmm_logcounts", "Training", "logCPM(TMM)", split_scheme, .y),
+          sample_expression_values(sce_ref[, test_i], "cpm_tmm_logcounts", "Test", "logCPM(TMM)", split_scheme, .y),
+          sample_expression_values(sce_query, "cpm_tmm_logcounts", "Query", "logCPM(TMM)", split_scheme, .y)
+        )
+      }
+    )
+  }
+)
+
+qc_folds <- ggplot(labeltransfer_expr_qc_df %>% filter(split_scheme == "dataset_id"), aes(x = value, fill = sample_set, color = sample_set)) +
+  geom_density(alpha = 0.15) +
+  facet_grid(assay ~ fold, scales = "free") +
+  theme_classic() +
+  labs(
+    x = "Expression value",
+    y = "Density",
+    fill = "Sample set",
+    color = "Sample set",
+    title = "Training/test/query expression distributions"
+  )
+
+qc_folds
+
+ggsave("../output/gene_distribution_each_fold.pdf", width = 12, height = 8, bg = "white")
+```
+
+```{r}
+lt_probs_list <- vector("list", 0)
+fold_truth_pred <- vector("list", 0)
+
+for (split_scheme in names(split_plan_list)) {
+  plan <- split_plan_list[[split_scheme]]
+
+  for (i in seq_along(plan$folds)) {
+    cat(split_scheme, "fold", i, "\n")
+
+    test_i <- plan$folds[[i]]
+    train_i <- setdiff(seq_len(ncol(seu_ref)), test_i)
+
+    seu_train <- seu_ref[, train_i]
+    seu_test <- seu_ref[, test_i]
+
+    seu_train <- NormalizeData(seu_train) %>%
+      FindVariableFeatures() %>%
+      ScaleData(verbose = FALSE) %>%
+      RunPCA(npcs = 20, verbose = FALSE)
+
+    feats <- VariableFeatures(seu_train)
+
+    seu_test <- NormalizeData(seu_test) %>%
+      ScaleData(features = feats, verbose = FALSE) %>%
+      RunPCA(features = feats, npcs = 20, verbose = FALSE)
+
+    anchors <- FindTransferAnchors(
+      reference = seu_train,
+      query = seu_test,
+      dims = 1:10,
+      reference.reduction = "pca",
+      k.anchor = 10
+    )
+
+    predictions <- TransferData(
+      anchorset = anchors,
+      refdata = seu_train$ethnicity_clean,
+      dims = 1:10,
+      k.weight = 20
+    )
+
+    truth_clean <- seu_test$ethnicity_clean
+    pred_clean <- predictions$predicted.id
+
+    fold_truth_pred[[length(fold_truth_pred) + 1]] <- tibble(
+      split_scheme = split_scheme,
+      fold = i,
+      truth = factor(truth_clean, levels = clean_levels),
+      prediction = factor(pred_clean, levels = clean_levels),
       model = "LabelTransfer"
     )
-  
-  lt_probs_list[[i]] <- lt_prob
-}
 
+    score_cols <- grep("^prediction\\.score\\.", colnames(predictions), value = TRUE)
+
+    lt_prob <- predictions[, score_cols, drop = FALSE] %>%
+      as_tibble() %>%
+      rename_with(~ sub("^prediction\\.score\\.", "", .x)) %>%
+      mutate(across(everything(), ~ as.numeric(.x))) %>%
+      mutate(
+        truth = factor(truth_clean, levels = clean_levels),
+        fold = i,
+        model = "LabelTransfer",
+        split_scheme = split_scheme
+      )
+
+    missing_cols <- setdiff(clean_levels, colnames(lt_prob))
+    if (length(missing_cols) > 0) {
+      lt_prob[missing_cols] <- 0
+    }
+
+    lt_probs_list[[length(lt_probs_list) + 1]] <- lt_prob %>%
+      dplyr::select(all_of(clean_levels), truth, fold, model, split_scheme)
+  }
+}
 
 lt_model_probs <- bind_rows(lt_probs_list)
+results_all <- bind_rows(fold_truth_pred)
+```
 
-# pivot to long, binarise and compute ROC + AUC
-lt_roc_input <- lt_model_probs %>%
-  pivot_longer(cols      = clean_levels,
-               names_to  = "class",
-               values_to = "prob") %>%
-  mutate(
-    truth_binary = factor(truth == class,
-                          levels = c(FALSE, TRUE),
-                          labels = c("no", "yes"))
+```{r}
+fold_metrics_lt <- results_all %>%
+  group_by(split_scheme, model, fold) %>%
+  summarise(
+    acc = mean(truth == prediction),
+    balanced_acc = bal_accuracy_vec(truth, prediction),
+    macro_f1 = f_meas_vec(truth, prediction, estimator = "macro"),
+    weighted_f1 = f_meas_vec(truth, prediction, estimator = "macro_weighted"),
+    .groups = "drop"
   )
 
-lt_roc_curves <- lt_roc_input %>%
-  group_by(class) %>%
-  roc_curve(truth_binary, prob, event_level = "second")
+summary_lt <- fold_metrics_lt %>%
+  group_by(split_scheme, model) %>%
+  summarise(
+    acc_mean = mean(acc),
+    acc_sd = sd(acc),
+    balanced_acc_mean = mean(balanced_acc),
+    balanced_acc_sd = sd(balanced_acc),
+    macro_f1_mean = mean(macro_f1),
+    macro_f1_sd = sd(macro_f1),
+    weighted_f1_mean = mean(weighted_f1),
+    weighted_f1_sd = sd(weighted_f1),
+    .groups = "drop"
+  )
 
-lt_auc <- lt_roc_input %>%
-  group_by(class) %>%
-  roc_auc(truth_binary, prob, event_level = "second")
-```
+summary_lt
 
-```{r}
-results <- data.frame(
-  truth = factor(all_true, levels = levels_order),
-  prediction = factor(clean_to_ori_name[all_preds], levels = levels_order))
-```
+per_class_lt <- results_all %>%
+  group_by(split_scheme, model, fold) %>%
+  group_modify(~ {
+    df <- .x
+    bind_rows(lapply(clean_levels, function(cls) {
+      df2 <- df %>%
+        mutate(
+          truth_binary = factor(if_else(truth == cls, "yes", "no"), levels = c("yes", "no")),
+          pred_binary = factor(if_else(prediction == cls, "yes", "no"), levels = c("yes", "no"))
+        )
 
+      prec <- precision(df2, truth_binary, pred_binary, event_level = "first")$.estimate
+      rec <- recall(df2, truth_binary, pred_binary, event_level = "first")$.estimate
+      f1 <- f_meas(df2, truth_binary, pred_binary, event_level = "first")$.estimate
 
-
-```{r}
-compute_metrics_by_group <- function(results, m){
-  etrics_by_label <- lapply(levels_order, function(lbl) {
-    df <- results %>%
-      mutate(
-        truth_binary = factor(if_else(truth == lbl, "yes", "no"), levels = c("yes", "no")),
-        prediction_binary = factor(if_else(prediction == lbl, "yes", "no"), levels = c("yes", "no"))
+      tibble(
+        class = cls,
+        precision = ifelse(is.na(prec), 0, prec),
+        recall = ifelse(is.na(rec), 0, rec),
+        f1 = ifelse(is.na(f1), 0, f1),
+        support = sum(df$truth == cls)
       )
-    
-    prec <- precision(df, truth = truth_binary, estimate = prediction_binary, event_level = "first")$.estimate
-    rec  <- recall(df, truth = truth_binary, estimate = prediction_binary, event_level = "first")$.estimate
-    f1   <- f_meas(df, truth = truth_binary, estimate = prediction_binary, event_level = "first")$.estimate
-    
-    acc <- sum(df$truth == lbl & df$prediction == lbl) / sum(df$truth == lbl)
-    
-    tibble(
-      Label = lbl,
-      Accuracy = acc,
-      Precision = prec,
-      Recall = rec,
-      F1 = f1
-    )
+    }))
   }) %>%
-    bind_rows() %>%
-    mutate(method = m)
-  return(etrics_by_label)
-}
-```
-
-
-```{r}
-metrics_by_label.lt <- compute_metrics_by_group(results, "LabelTransfer") 
-
-metrics_by_label.lt
-```
-
-## random forrest & etc
-
-```{r}
-seu_ref$ethnicity_relabel <- factor(seu_ref$ethnicity_relabel, levels = levels_order)
-```
-
-```{r}
-set.seed(32)
-folds <- createFolds(seu_ref$ethnicity_relabel, k = 10, list = TRUE, returnTrain = FALSE)
-
-all_true_rf <- c()
-all_preds_rf <- c()
-
-all_true_xgb <- c()
-all_preds_xgb <- c()
-
-all_true_svm <- c()
-all_preds_svm <- c()
-
-all_true_log <- c()
-all_preds_log <- c()
-
-rf_probs_list  <- list()
-xgb_probs_list <- list()
-svm_probs_list <- list()
-log_probs_list <- list()
-
-for(i in seq_along(folds)) {
-  cat("Fold", i, "\n")
-  test_i  <- folds[[i]]
-  train_i <- setdiff(seq_len(ncol(seu_ref)), test_i)
-  
-  train_feats <- t(as.matrix(seu_ref@assays$originalexp$counts[, train_i]))
-  test_feats  <- t(as.matrix(seu_ref@assays$originalexp$counts[, test_i]))
-  train_lbl   <- seu_ref$ethnicity_clean[train_i]
-  test_lbl    <- seu_ref$ethnicity_clean[test_i]
-  
-  # rf
-  rf_mod  <- randomForest(x = train_feats, y = train_lbl, ntree = 100)
-  rf_preds <- predict(rf_mod, test_feats)
-  all_true_rf <- c(all_true_rf, as.character(test_lbl))
-  all_preds_rf <- c(all_preds_rf, as.character(rf_preds))
-  rf_prob <- predict(rf_mod, test_feats, type = "prob") %>%
-    as_tibble() %>%
-    mutate(truth = test_lbl,
-           fold  = i,
-           model = "RandomForest")
-  rf_probs_list[[i]] <- rf_prob
-  
-  # xgb
-  xgb_mod <- train(x = train_feats, y = train_lbl,
-                   method    = "xgbTree",
-                   trControl = trainControl(method = "none", classProbs = TRUE),
-                   tuneGrid  = data.frame(nrounds=100, max_depth=6, eta=0.3,
-                                          gamma=0, colsample_bytree=1,
-                                          min_child_weight=1, subsample=1))
-  xgb_preds <- predict(xgb_mod, test_feats)
-  all_true_xgb <- c(all_true_xgb, as.character(test_lbl))
-  all_preds_xgb <- c(all_preds_xgb, as.character(xgb_preds))
-  xgb_prob <- predict(xgb_mod, test_feats, type = "prob") %>%
-    as_tibble() %>%
-    mutate(truth = test_lbl,
-           fold  = i,
-           model = "XGBoost")
-  xgb_probs_list[[i]] <- xgb_prob
-  
-  # svm
-  svm_mod <- train(x = train_feats, y = train_lbl,
-                   method    = "svmRadial",
-                   trControl = trainControl(method = "none", classProbs = TRUE),
-                   tuneLength=1)
-  svm_preds <- predict(svm_mod, test_feats)
-  all_true_svm <- c(all_true_svm, as.character(test_lbl))
-  all_preds_svm <- c(all_preds_svm, as.character(svm_preds))
-  svm_prob <- predict(svm_mod, test_feats, type = "prob") %>%
-    as_tibble() %>%
-    mutate(truth = test_lbl,
-           fold  = i,
-           model = "SVM")
-  svm_probs_list[[i]] <- svm_prob
-  
-  # multinomial logistic regression
-  log_mod <- train(x = train_feats, y = train_lbl,
-                   method    = "multinom",
-                   trControl = trainControl(method = "none", classProbs = TRUE),
-                   trace     = FALSE, MaxNWts = 5000)
-  log_preds <- predict(log_mod, test_feats)
-  all_true_log <- c(all_true_log, as.character(train_lbl))
-  all_preds_log <- c(all_preds_log, as.character(log_preds))
-  log_prob <- predict(log_mod, test_feats, type = "prob") %>%
-    as_tibble() %>%
-    mutate(truth = test_lbl,
-           fold  = i,
-           model = "LogisticRegression")
-  log_probs_list[[i]] <- log_prob
-}
-
-model_probs <- rbind(
-  bind_rows(rf_probs_list),
-  bind_rows(xgb_probs_list),
-  bind_rows(svm_probs_list),
-  bind_rows(log_probs_list)
-)
-```
-
-```{r}
-roc_input <- model_probs %>%
-  pivot_longer(
-    cols = all_of(clean_levels),
-    names_to  = "class",
-    values_to = "prob"
+  ungroup() %>%
+  mutate(Label = clean_to_ori_name[class]) %>%
+  group_by(split_scheme, model, Label) %>%
+  summarise(
+    precision_mean = mean(precision),
+    precision_sd = sd(precision),
+    recall_mean = mean(recall),
+    recall_sd = sd(recall),
+    f1_mean = mean(f1),
+    f1_sd = sd(f1),
+    support_total = sum(support),
+    .groups = "drop"
   )
 
-roc_input_bin <- roc_input %>%
-  mutate(truth_binary = truth == class) %>%
-  mutate(truth_binary = factor(truth_binary, levels = c(FALSE, TRUE),
-                               labels = c("no", "yes")))
-
-roc_curves <- roc_input_bin %>%
-  group_by(model, class) %>%
-  roc_curve(truth_binary, prob, event_level = "second")
-
-ggplot(rbind(roc_curves, lt_roc_curves %>% mutate(model = "LabelTransfer")), aes(1 - specificity, sensitivity, color = model)) +
-  geom_line() +
-  facet_wrap(~ class) +
-  geom_abline(lty = 2) +
-  theme_ning() +
-  labs(x = "FPR", y = "TPR", title = "One-vs-All ROC Curves")
-```
-
-
-```{r}
-rf_results <- data.frame(
-  truth = factor(all_true_rf, levels = levels_order),
-  prediction = factor(all_preds_rf, levels = levels_order)
-)
-xgb_results <- data.frame(
-  truth = factor(all_true_xgb, levels = levels_order),
-  prediction = factor(all_preds_xgb, levels = levels_order)
-)
-svm_results <- data.frame(
-  truth = factor(all_true_svm, levels = levels_order),
-  prediction = factor(all_preds_svm, levels = levels_order)
-)
-log_results <- data.frame(
-  truth = factor(all_true_log, levels = levels_order),
-  prediction = factor(all_preds_log, levels = levels_order)
-)
+per_class_lt
 ```
 
 ```{r}
-#| warning: false
-compute_metrics <- function(results_df, method_name) {
-  metrics_res <- rbind(accuracy(results_df, truth, prediction),
-                       precision(results_df, truth, prediction),
-                       recall(results_df, truth, prediction),
-                       f_meas(results_df, truth, prediction))
-  metrics_res <- metrics_res %>%
-    dplyr::select(-.estimator) %>%
-    mutate(Methods = method_name) %>%
-    magrittr::set_colnames(c("Metrics","Score", "Methods")) %>%
-    mutate(Metrics = c("Accuracy","Precision","Recall","F1")) %>%
-    dplyr::select(c("Methods","Metrics","Score"))
-  return(metrics_res)
-}
-
-rf_metrics <- compute_metrics(rf_results, "RandomForest")
-xgb_metrics <- compute_metrics(xgb_results, "XGBoost")
-svm_metrics <- compute_metrics(svm_results, "SVM")
-log_metrics <- compute_metrics(log_results, "LogisticRegression")
-```
-
-
-```{r}
-#| warning: false
-metrics_df_by_group <- rbind(compute_metrics_by_group(rf_results, "RandomForest"),
-compute_metrics_by_group(xgb_results, "XGBoost"),
-compute_metrics_by_group(svm_results, "SVM"),
-compute_metrics_by_group(log_results, "LogisticRegression")) %>%
-  rbind(metrics_by_label.lt)
-  
-```
-
-
-MLP performs the best, labeltransfer comes second.
-
-MLP structure:
-
-Input:
-
-feature matrix - the 20 PCA matrix.
-
-Hidden Layers:
-
-The network has three hidden layers with sizes:\
-- Layer 1: 128 neurons\
-- Layer 2: 64 neurons\
-- Layer 3: 32 neurons\
-
-Each hidden layer consists of:\
-- A Linear (fully connected) transformation\
-- Batch Normalization\
-- ReLU activation\
-- Dropout (dropout probability = 0.1)\
-
-Output Layer:
-
-The final layer is a Linear layer that maps the output of the last hidden layer to the number of classification categories, e.g. ethnicity labels.
-
-Training settings:
-
--   Elastic net regularization:\
-
-    -   L1 factor: $\lambda_1 = 1 \times 10^{-7}$\
-    -   L2 factor: $\lambda_2 = 1 \times 10^{-6}$\
-
--   Adam optimizer (learning rate = 0.001)
-
--   200 Epochs
-
-The total loss is computed as the sum of the cross-entropy loss and the elastic net penalty:
-
-$$
-\text{Loss} = \text{CrossEntropyLoss}(y, \hat{y}) + \lambda_1 \sum_{i} |\theta_i| + \lambda_2 \sum_{i} \theta_i^2
-$$
-
-Where:\
-- $y$ are the true labels\
-- $\hat{y}$ are the predicted outputs\
-- $\lambda_1 = 1 \times 10^{-7}$ is the L1 regularization factor\
-- $\lambda_2 = 1 \times 10^{-6}$ is the L2 regularization factor\
-- $\theta_i$ represents the model parameters.
-
-```{r}
-mlp_prob <- read_csv("../data/test_probs.csv")
-
-roc_input_mlp <- mlp_prob %>%
-  pivot_longer(
-    cols = all_of(levels_order),
-    names_to  = "class",
-    values_to = "prob"
+lt_confusion_df <- results_all %>%
+  dplyr::count(split_scheme, truth, prediction, name = "n") %>%
+  group_by(split_scheme, truth) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    truth_label = clean_to_ori_name[as.character(truth)],
+    prediction_label = clean_to_ori_name[as.character(prediction)]
   )
 
-roc_input_bin_mlp <- roc_input_mlp %>%
-  mutate(truth_binary = truth == class) %>%
-  mutate(truth_binary = factor(truth_binary, levels = c(FALSE, TRUE),
-                               labels = c("no", "yes")))
+ggplot(lt_confusion_df, aes(x = prediction_label, y = truth_label, fill = prop)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 3) +
+  scale_fill_viridis_c(labels = scales::percent_format(accuracy = 1)) +
+  facet_wrap(~ split_scheme) +
+  theme_classic() +
+  labs(
+    x = "Predicted ethnicity",
+    y = "True ethnicity",
+    fill = "Row proportion",
+    title = "LabelTransfer confusion matrices across held-out folds"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
 
-roc_curves_mlp <- roc_input_bin_mlp %>%
-  mutate(model = "MLP") %>%
-  group_by(model, class) %>%
+```{r}
+lt_roc_input <- lt_model_probs %>%
+  pivot_longer(cols = all_of(clean_levels), names_to = "class", values_to = "prob") %>%
+  mutate(truth_binary = factor(truth == class, levels = c(FALSE, TRUE), labels = c("no", "yes")))
+
+lt_roc_input_ok <- lt_roc_input %>%
+  group_by(split_scheme, class, fold) %>%
+  filter(any(truth_binary == "yes") & any(truth_binary == "no")) %>%
+  ungroup()
+
+lt_roc_curves <- lt_roc_input_ok %>%
+  group_by(split_scheme, class, fold) %>%
   roc_curve(truth_binary, prob, event_level = "second") %>%
-  left_join(data.frame("class" = levels_order, "cclass" = clean_levels)) %>%
-  mutate(class = cclass) %>%
-  dplyr::select(-cclass)
+  ungroup() %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = "LabelTransfer",
+    ethnicity = clean_to_ori_name[class],
+    fold = fold,
+    fpr = 1 - specificity,
+    tpr = sensitivity
+  )
 
+lt_auc_by_class <- lt_roc_input_ok %>%
+  group_by(split_scheme, class, fold) %>%
+  roc_auc(truth_binary, prob, event_level = "second") %>%
+  ungroup() %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = "LabelTransfer",
+    ethnicity = clean_to_ori_name[class],
+    fold = fold,
+    auc = .estimate
+  )
+
+lt_auc_by_class
 ```
 
 ```{r}
-#| fig-height: 7
-#| fig-width: 8
+roc_py <- read_csv("../roc_points.csv") %>%
+  mutate(model_display = model) %>%
+  mutate(model_display = str_remove(model_display, "_S_")) %>%
+  filter(model_display %in% selected_models) %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = model_display,
+    ethnicity = ethnicity,
+    fold = fold,
+    fpr = fpr,
+    tpr = tpr
+  )
 
-roc_df <- rbind(roc_curves, 
-                lt_roc_curves %>% mutate(model = "LabelTransfer") %>%
-                rbind(roc_curves_mlp)) %>%
-  left_join(data.frame("cclass" = levels_order, "class" = clean_levels)) %>%
-  mutate(class = cclass) %>%
-  dplyr::select(-cclass)
+auc_py <- read_csv("../auc_by_class.csv") %>%
+  mutate(model_display = model) %>%
+  mutate(model_display = str_remove(model_display, "_S_")) %>%
+  filter(model_display %in% selected_models) %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = model_display,
+    ethnicity = ethnicity,
+    fold = fold,
+    auc = auc
+  )
 
-#pdf("../output/ModelROC_vector.pdf", width = 9, height = 7)
+roc_all <- bind_rows(roc_py, lt_roc_curves) %>%
+  mutate(
+    split_scheme = factor(split_scheme, levels = c("dataset_id", "tissue_groups")),
+    model_display = factor(model_display),
+    ethnicity = factor(ethnicity)
+  ) %>%
+  mutate(model_display = str_remove(model_display, "_S_"))
 
-p_model_performance <- ggplot(roc_df, 
-       aes(1 - specificity, sensitivity, color = model)) +
-  geom_line(cex = 1) +
-  facet_wrap(~ class) +
-  geom_abline(lty = 2) +
-  theme_ning() +
-  scale_color_manual(values = ggsci::pal_jama()(6)) +
-  labs(x = "FPR", y = "TPR") +
-  theme(legend.position = "bottom",
-        strip.background =element_blank(),
-        strip.text = element_text(colour = 'black'), 
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_blank(),
-        axis.line = element_line(size = 0.1),
-        panel.border = element_rect(size = 1), legend.margin = unit(c(5,5,5,5), "pt"))
+auc_all <- bind_rows(auc_py, lt_auc_by_class) %>%
+  mutate(
+    split_scheme = factor(split_scheme, levels = c("dataset_id", "tissue_groups")),
+    model_display = factor(model_display),
+    ethnicity = factor(ethnicity)
+  ) %>%
+  mutate(model_display = str_remove(model_display, "_S_"))
+```
+
+```{r}
+method_names <- unique(as.character(roc_all$model_display))
+
+if (length(method_names) <= length(ning_colors)) {
+  method_cols <- ning_colors[seq_along(method_names)]
+} else {
+  method_cols <- colorRampPalette(ning_colors)(length(method_names))
+}
+
+names(method_cols) <- method_names
+
+fpr_grid <- seq(0, 1, by = 0.01)
+
+interp_roc <- function(df_one, grid = fpr_grid) {
+  df_one <- df_one %>%
+    arrange(fpr, tpr) %>%
+    group_by(fpr) %>%
+    summarise(tpr = max(tpr), .groups = "drop")
+
+  tibble(
+    fpr = grid,
+    tpr = approx(df_one$fpr, df_one$tpr, xout = grid, ties = "ordered", rule = 2)$y
+  )
+}
+
+roc_one_line <- roc_all %>%
+  group_by(split_scheme, model_display, ethnicity, fold) %>%
+  group_modify(~ interp_roc(.x)) %>%
+  ungroup() %>%
+  group_by(split_scheme, model_display, ethnicity, fpr) %>%
+  summarise(tpr = median(tpr, na.rm = TRUE), .groups = "drop")
+
+
+```
+
+
+```{r}
+#| fig-width: 13
+#| fig-height: 13
+ggplot(roc_one_line %>% filter(split_scheme == "dataset_id"), 
+       aes(x = fpr, y = tpr, color = model_display)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~model_display) +
+  geom_abline(linetype = 2) +
+  scale_color_manual(values = method_cols) +
+  coord_equal() +
+  theme_classic() +
+  labs(x = "FPR", y = "TPR", color = "Method", title = "ROC curves (median across CV folds) - dataset_id held-out") +
+  theme(legend.position = "none")
+```
+
+```{r}
+roc_one_line_final <- roc_one_line %>% 
+    filter(!grepl("CPM",model_display))
+
+method_cols_f <- method_cols[unique(roc_one_line_final$model_display)]
+
+roc_one_line_final <- roc_one_line_final %>% 
+  mutate(model_display = str_remove(model_display,"_Log1p"))
+
+names(method_cols_f) <- unique(roc_one_line_final$model_display)
+
+ggplot(roc_one_line_final, 
+       aes(x = fpr, y = tpr, color = model_display)) +
+  geom_line(linewidth = 1, color = "gray") +
+  facet_wrap(~model_display) +
+  geom_abline(linetype = 2, color = "black") +
+  coord_equal() +
+  theme_classic() +
+  labs(x = "FPR", y = "TPR", color = "Method", title = "ROC curves (median across CV folds)") +
+  theme(legend.position = "none")
+
+ggsave("../output/ROC_all.png", width = 10, height = 10, bg = "white")
+```
+
+
+```{r}
+good_models <- c("HistGBDT_TMMScale", "HistGBDT_TMMPCA", "LabelTransfer",
+                 "LinearSVM_TMMPCA", "LogReg_TMMPCA",
+                 "MLP_TMMScale","RandomForest_TMMScale")
+
+gm_cols <- c("#44545B","#DE903F","#249FD1","#BB4E49",
+             "#7EAE94", "#7570AB", "#C6A24C")
+
+names(gm_cols) <- good_models
+```
+
+
+
+```{r}
+p_model_performance <- ggplot(roc_one_line_final %>% 
+                                filter(split_scheme == "dataset_id") %>%
+                                filter(model_display %in% good_models), aes(x = fpr, y = tpr, color = model_display)) +
+  geom_line(linewidth = 1) +
+  facet_wrap( ~ ethnicity, nrow = 2, scales = "free") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  scale_color_manual(values = gm_cols) +
+  theme_classic() +
+  labs(x = "False-postivie rate", y = "True-positive rate", color = "Method", title = "") +
+  scale_x_continuous(breaks = c(0,0.5,1)) +
+  scale_y_continuous(breaks = c(0,0.5,1)) +
+  theme(legend.position = "none", strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        axis.title = element_text(size = 12))
 
 p_model_performance
 
-#dev.off()
+ggsave("../output/roc_performance.pdf", width = 7, height = 5, bg = "white")
+```
 
-#ggsave("../output/ModelROC.pdf", width = 9, height = 7)
+
+```{r}
+p_model_performance_tho <- ggplot(roc_one_line_final %>% 
+                                    filter(split_scheme == "tissue_groups") %>%
+                                    filter(model_display %in% good_models), aes(x = fpr, y = tpr, color = model_display)) +
+  geom_line(linewidth = 1) +
+  facet_wrap( ~ ethnicity, nrow = 2, scales = "free") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  scale_color_manual(values = gm_cols) +
+  theme_classic() +
+  labs(x = "False-postivie rate", y = "True-positive rate", color = "Method", title = "") +
+  scale_x_continuous(breaks = c(0,0.5,1)) +
+  scale_y_continuous(breaks = c(0,0.5,1)) +
+  theme(legend.position = "none", strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        axis.title = element_text(size = 12))
+
+p_model_performance_tho
+
+ggsave("../output/roc_performance_tho.pdf", width = 13, height = 7, bg = "white")
+```
+
+
+
+```{r}
+overall_py2 <- read_csv("../overall_performance.csv") %>%
+  mutate(model = str_remove(model, "_S_")) %>%
+  rename_with(~ gsub("_std$", "_sd", .x)) %>%
+  mutate(model_display = model) %>%
+  filter(model_display %in% selected_models)
+  
+
+pereth_py2 <- read_csv("../pereth_performance.csv") %>%
+  mutate(model = str_remove(model, "_S_")) %>%
+  mutate(
+    model_display = model,
+    Label = as.character(ethnicity)
+  ) %>%
+  filter(model_display %in% selected_models) %>%
+  dplyr::select(-model, -ethnicity)
+
+overall_lt2 <- summary_lt %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = "LabelTransfer",
+    acc_mean = acc_mean,
+    acc_sd = acc_sd,
+    balanced_acc_mean = balanced_acc_mean,
+    balanced_acc_sd = balanced_acc_sd,
+    macro_f1_mean = macro_f1_mean,
+    macro_f1_sd = macro_f1_sd,
+    weighted_f1_mean = weighted_f1_mean,
+    weighted_f1_sd = weighted_f1_sd
+  )
+
+pereth_lt2 <- per_class_lt %>%
+  transmute(
+    split_scheme = split_scheme,
+    model_display = "LabelTransfer",
+    Label = Label,
+    precision_mean = precision_mean,
+    precision_sd = precision_sd,
+    recall_mean = recall_mean,
+    recall_sd = recall_sd,
+    f1_mean = f1_mean,
+    f1_sd = f1_sd,
+    support_total = support_total
+  )
+
+overall_all <- bind_rows(overall_py2 %>% dplyr::select(-model), overall_lt2) %>%
+  mutate(
+    split_scheme = factor(split_scheme, levels = c("dataset_id", "tissue_groups")),
+    model_display = factor(model_display, levels = c(selected_models, "LabelTransfer"))
+  )
+
+pereth_all <- bind_rows(pereth_py2, pereth_lt2) %>%
+  mutate(
+    split_scheme = factor(split_scheme, levels = c("dataset_id", "tissue_groups")),
+    model_display = factor(model_display, levels = c(selected_models, "LabelTransfer"))
+  ) %>%
+  mutate(model_display = str_remove(model_display,"_Log1p"))
 ```
 
 ```{r}
-auc_caret <- roc_input_bin %>%
-  group_by(model, class) %>%
-  roc_auc(truth_binary, prob, event_level = "second")
+overall_long <- overall_all %>%
+  pivot_longer(cols = ends_with("_mean"), names_to = "metric", values_to = "mean") %>%
+  mutate(metric = sub("_mean$", "", metric)) %>%
+  left_join(
+    overall_all %>%
+      pivot_longer(cols = ends_with("_sd"), names_to = "metric_sd", values_to = "sd") %>%
+      mutate(metric = sub("_sd$", "", metric_sd)) %>%
+      dplyr::select(split_scheme, model_display, metric, sd),
+    by = c("split_scheme", "model_display", "metric")
+  ) %>%
+  filter(!metric %in% c("balanced_acc", "weighted_f1")) %>%
+  mutate(model_display = str_remove(model_display,"_Log1p"))
 
-# 2. Label transfer
-auc_lt <- lt_roc_input %>%
-  mutate(model = "LabelTransfer") %>%
-  group_by(model, class) %>%
-  roc_auc(truth_binary, prob, event_level = "second")
+ov_performance <- ggplot(overall_long %>%
+         filter(split_scheme == "dataset_id",
+                model_display %in% good_models), aes(x = model_display, y = mean, fill = model_display)) +
+  geom_col(width = 0.75) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_fill_manual(values = gm_cols) +
+  guides(fill = guide_legend(override.aes = list(shape = 15))) +
+  labs(fill = "Models") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none",
+        strip.background = element_blank()) +
+  labs(x = "Method", y = "Score", title = "")
 
-# 3. MLP
-auc_mlp <- roc_input_bin_mlp %>%
-  mutate(model = "MLP") %>%
-  left_join(data.frame("class" = levels_order, "cclass" = clean_levels)) %>%
-  mutate(class = cclass) %>%
-  dplyr::select(-cclass) %>%
-  group_by(model, class) %>%
-  roc_auc(truth_binary, prob, event_level = "second")
+ov_performance
 
-# 4. Combine
-auc_all <- bind_rows(auc_caret, auc_lt, auc_mlp) %>%
-  left_join(data.frame("cclass" = levels_order, "class" = clean_levels)) %>%
-  mutate(class = cclass) %>%
-  dplyr::select(-cclass) %>%
-  magrittr::set_colnames(c("method","Label","Metrics","estimator","Score")) %>%
-  dplyr::select(-estimator) %>%
-  mutate(Metrics = "AUC")
+ggsave("../output/benchmark_overall_performance.pdf", width = 7, height = 3, bg = "white")
+
+ov_performance +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(ncol = 1))
+
+ggsave("../output/benchmark_overall_performance_legend.pdf", width = 7, height = 7, bg = "white")
+
 
 ```
 
 ```{r}
-#| fig-width: 9
-#| fig-height: 9
-mlp_metrics <- read_csv("../data/classifierMetrics.csv")
+ov_performance_tho <- ggplot(overall_long %>%
+         filter(split_scheme == "tissue_groups",
+                model_display %in% good_models), aes(x = model_display, y = mean, fill = model_display)) +
+  geom_col(width = 0.75) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_fill_manual(values = gm_cols) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none") +
+  labs(x = "Method", y = "Score", title = "Overall performance - tissue held-out")
 
+ov_performance_tho
 
-mlp_metrics %>%
-  magrittr::set_colnames(colnames(metrics_df_by_group)) %>%
-  rbind(metrics_df_by_group) %>%
-  pivot_longer(-c(Label, method), names_to = "Metrics", values_to = "Score") %>%
-  rbind(auc_all) %>%
-  ggplot(aes(Metrics, Score, fill = method)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  theme_ning() +
-  scale_fill_manual(values = ggsci::pal_jama()(6)) +
-  facet_wrap(~Label) +
-  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=0.7))
-
-ggsave("../output/ModelMetrics.pdf", width = 9, height = 9)
+ggsave("../output/benchmark_overall_performance_tho.pdf", width = 8, height = 6, bg = "white")
 ```
 
+
+
+
+
+```{r}
+pereth_long <- pereth_all %>%
+  pivot_longer(cols = c(precision_mean, recall_mean, f1_mean), names_to = "metric", values_to = "mean") %>%
+  mutate(metric = sub("_mean$", "", metric)) %>%
+  left_join(
+    pereth_all %>%
+      pivot_longer(cols = c(precision_sd, recall_sd, f1_sd), names_to = "metric_sd", values_to = "sd") %>%
+      mutate(metric = sub("_sd$", "", metric_sd)) %>%
+      dplyr::select(split_scheme, model_display, Label, metric, sd),
+    by = c("split_scheme", "model_display", "Label", "metric")
+  )
+
+pppho1 <- ggplot(pereth_long %>%
+         filter(split_scheme == "dataset_id",
+                model_display %in% good_models), aes(x = model_display, y = mean, fill = model_display)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), position = position_dodge(width = 0.8), width = 0.2) +
+  facet_grid(Label ~ metric, scales = "free_y") +
+  scale_fill_manual(values = gm_cols) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") +
+  labs(x = "Method", y = "Score", title = "Per-ethnicity performance (mean±sd across folds) - dataset held-out")
+
+pppho1
+
+ggsave("../output/benchmark_pereth_performance.png", width = 12, height = 10, bg = "white")
+```
+
+
+```{r}
+pppho2 <- ggplot(pereth_long %>%
+         filter(split_scheme == "tissue_groups",
+                model_display %in% good_models), aes(x = model_display, y = mean, fill = model_display)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), position = position_dodge(width = 0.8), width = 0.2) +
+  facet_grid(Label ~ metric, scales = "free_y") +
+  scale_fill_manual(values = gm_cols) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") +
+  labs(x = "Method", y = "Score", title = "Per-ethnicity performance (mean±sd across folds) - tissue held-out")
+
+pppho2
+
+ggsave("../output/benchmark_pereth_performance_tho.pdf", width = 12, height = 14, bg = "white")
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 15
+p_model_performance_tho + ov_performance_tho + pppho2 +
+  plot_layout(ncol = 1, heights = c(2,2,3)) +
+  plot_annotation(tag_levels = "A")
+
+ggsave("../output/benchmark_tho.png", width = 10, height = 15, bg = "white")
+```
+
+
+```{r}
+pppho1 + pppho2 + plot_layout(ncol = 1)
+
+ggsave("../output/benchmark_models_per_ethnicity.png", width =10, height = 12, bg = "white")
+```
+
+
+
+# Final prediction results
+
+```{r}
+final_predictions <- read_csv("../histgbdt_Log1pTMM_S_PCA_query_predictions.csv")
+
+table(final_predictions$predicted_ethnicity)
+```
 
 
 # Markers
 
 ```{r}
+library(org.Hs.eg.db)
+
 df <- assay(sce_ref, "counts_adjusted_ethnicity") %>%
   as.data.frame() %>%
   rownames_to_column("gene") %>%
   pivot_longer(-gene, names_to = "sampleid", values_to = "counts") %>%
-  left_join(colData(sce_ref) %>% 
-              as.data.frame() %>% 
-              dplyr::select("ethnicity_relabel") %>% 
+  left_join(colData(sce_ref) %>%
+              as.data.frame() %>%
+              dplyr::select("ethnicity_relabel") %>%
               rownames_to_column("sampleid")) %>%
-  dplyr::select(c("ethnicity_relabel","gene","counts")) %>%
+  dplyr::select(c("ethnicity_relabel", "gene", "counts")) %>%
   group_by(ethnicity_relabel, gene) %>%
-  mutate(meanc = log(mean(counts))) %>%
-  dplyr::select(-counts) %>%
-  unique() %>%
-  ungroup() %>%
+  summarise(meanc = mean(counts), .groups = "drop") %>%
   pivot_wider(names_from = "gene", values_from = "meanc") %>%
   column_to_rownames("ethnicity_relabel")
 
-library(org.Hs.eg.db)
+marker_gene_lookup <- tibble(gene = unique(top_markers_all$gene)) %>%
+  mutate(symbol = NA_character_)
 
-symbol_vec <- mapIds(
+ensg_idx <- str_detect(marker_gene_lookup$gene, "^ENSG")
+
+marker_gene_lookup$symbol[ensg_idx] <- mapIds(
   org.Hs.eg.db,
-  keys      = colnames(df),
-  column    = "SYMBOL",
-  keytype   = "ENSEMBL",
-  multiVals = "first"    
-)
+  keys = marker_gene_lookup$gene[ensg_idx],
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+) %>%
+  unname()
 
-symbol_vec[ is.na(symbol_vec) ] <- colnames(df)[ is.na(symbol_vec) ]
+marker_gene_lookup <- marker_gene_lookup %>%
+  mutate(display_gene = coalesce(symbol, gene))
 
-colnames(df) <- symbol_vec
+marker_top5_table <- top_markers_all %>%
+  left_join(marker_gene_lookup, by = "gene") %>%
+  mutate(
+    ethnicity_relabel = recode(
+      ethnicity,
+      Europeans = "European",
+      HispanicDLatinAmerican = "Hispanic",
+      .default = ethnicity
+    )
+  ) %>%
+  filter(
+    ethnicity_relabel %in% rownames(df),
+    !is.na(display_gene),
+    !str_detect(display_gene, "^ENSG")
+  ) %>%
+  arrange(ethnicity_relabel, desc(dist0_CI), desc(estimate)) %>%
+  distinct(ethnicity_relabel, display_gene, .keep_all = TRUE) %>%
+  group_by(ethnicity_relabel) %>%
+  slice_head(n = 5) %>%
+  ungroup() %>%
+  dplyr::select(
+    ethnicity_relabel, gene, display_gene,
+    dist0_CI, estimate, ci_lower, ci_upper, star
+  )
 
-means_mat <- as.matrix(df)
+marker_plot_lookup <- marker_gene_lookup %>%
+  distinct(gene, display_gene) %>%
+  mutate(plot_label = make.unique(display_gene, sep = "_"))
 
-fc_mat <- means_mat
-for (cl in rownames(means_mat)) {
-  others     <- setdiff(rownames(means_mat), cl)
-  max_other  <- apply(means_mat[others, , drop=FALSE], 2, max)
-  fc_mat[cl, ] <- means_mat[cl, ] / (max_other + 1e-6)
-}
+marker_top5_labels <- marker_top5_table %>%
+  distinct(gene, display_gene) %>%
+  left_join(marker_plot_lookup, by = c("gene", "display_gene")) %>%
+  pull(plot_label)
 
-topN <- 5
-top_genes_by_cl <- lapply(rownames(fc_mat), function(cl) {
-  head( names(sort(fc_mat[cl, ], decreasing = TRUE)), topN )
+marker_genes <- marker_plot_lookup$gene
+sub_mat <- as.matrix(df[, marker_genes, drop = FALSE])
+colnames(sub_mat) <- marker_plot_lookup$plot_label[match(colnames(sub_mat), marker_plot_lookup$gene)]
+
+keep_cols <- apply(sub_mat, 2, function(x) {
+  all(is.finite(x)) && sd(x) > 0
 })
-names(top_genes_by_cl) <- rownames(fc_mat)
 
-marker_genes <- unique(unlist(top_genes_by_cl))
+dropped_marker_genes <- colnames(sub_mat)[!keep_cols]
 
-
-sub_mat <- means_mat[, marker_genes, drop=FALSE]  
+sub_mat <- sub_mat[, keep_cols, drop = FALSE]
+if (ncol(sub_mat) == 0) {
+  stop("No finite, non-constant marker genes remained for the heatmap.")
+}
 sub_mat_z <- scale(sub_mat)
 
-cluster_cols <- setNames(
-  ggsci::pal_npg()(7),
-  rownames(sub_mat_z)
-)
+marker_top5_table
+
+if (length(dropped_marker_genes) > 0) {
+  tibble(dropped_marker_gene = dropped_marker_genes)
+}
+
+write_csv(marker_top5_table, "../output/top5_markers_by_ethnicity_dist0CI.csv")
+
+cluster_cols <- my_colors
 
 ```
 
-```{r}
-#| fig-height: 6
-#| fig-width: 15
 
-pdf("../output/Ethnicity_markerG_heatmap_top5.pdf", height = 7, width = 15)
-hm <- pheatmap::pheatmap(
-  sub_mat_z,            
-  cluster_rows   = TRUE,   
-  cluster_cols   = TRUE,  
-  show_rownames  = TRUE,
-  show_colnames  = TRUE, 
-  fontsize_row   = 16, angle_col = 45,
-  fontsize_col   = 14, cellwidth = 25, cellheight = 25,
-  main           = NA, 
-  color = scico::scico(256, palette = "vik"), border_color = "black"
-) %>%
-  ggplotify::as.ggplot()
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(scico)
+
+m <- sub_mat_z
+
+genes_selected <- c("MMP8", "LGALS2", "GJB2", "IGLV8-61")
+
+genes_selected_present <- intersect(genes_selected, colnames(m))
+marker_top5_labels_present <- intersect(marker_top5_labels, colnames(m))
+genes_to_mark <- unique(c(marker_top5_labels_present, genes_selected_present))
+mark_idx <- which(colnames(m) %in% genes_to_mark)
+mark_lbl <- colnames(m)[mark_idx]
+mark_lbl_rendered <- ifelse(
+  mark_lbl %in% genes_selected_present,
+  paste0("<span style='color:red;'>", mark_lbl, "</span>"),
+  mark_lbl
+)
+mark_lbl_rendered <- gt_render(mark_lbl_rendered)
+
+if (length(setdiff(genes_selected, genes_selected_present)) > 0) {
+  tibble(missing_highlight_gene = setdiff(genes_selected, genes_selected_present))
+}
+
+col_fun <- colorRamp2(
+  c(min(m, na.rm = TRUE), 0, max(m, na.rm = TRUE)),
+  scico(3, palette = "vik")
+)
+
+row_name_cols <- cluster_cols[rownames(m)]
+row_name_cols[is.na(row_name_cols)] <- "black"
+
+ta <- HeatmapAnnotation(
+  mark = anno_mark(
+    at = mark_idx,
+    side = "bottom",
+    labels = mark_lbl_rendered,
+    labels_gp = gpar(fontsize = 9, fontface = "bold"),
+    link_gp = gpar(col = "black"),
+    link_width = unit(4, "mm"),
+    link_height = unit(3, "mm")
+  ),
+  annotation_name_side = "left",
+  show_annotation_name = FALSE
+)
+
+cht <- Heatmap(
+  m,
+  name = "Z",
+  col = col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 12, col = row_name_cols),
+  heatmap_width  = unit(35, "cm"),
+  heatmap_height = unit(8, "cm"),
+  column_dend_height = unit(2.5, "cm"),
+  row_dend_width = unit(2.5, "cm"),
+  border = TRUE,
+  bottom_annotation = ta
+)
+
+pdf("../output/Ethnicity_markerG_heatmap_full_ComplexHeatmap.pdf",
+    width = 18, height = 8)
+draw(cht, heatmap_legend_side = "right", annotation_legend_side = "right")
 dev.off()
+
 ```
 
 
@@ -1175,14 +1915,12 @@ W   <- 800
 H   <- 600  
 Wt  <- 400    
 
-# 1. Create your ggplot as usual:
 p <- p_onlyhighscore
 
 img <- image_graph(width = W, height = H, res = 96)
 print(p)  # your ggplot
 dev.off()
 
-# Compute insets
 ht   <- (W - Wt) / 2
 y_top <- 250        # e.g. 50px down
 H2    <- 450       # bottom edge at 450px instead of 600px
@@ -1202,7 +1940,6 @@ img_trap <- image_distort(
 )
 
 
-# 5. Display it:
 plot(img_trap)
 
 
@@ -1213,7 +1950,6 @@ g <- rasterGrob(
   interpolate = TRUE
 )  # keeps high fidelity :contentReference[oaicite:6]{index=6}
 
-# Embed but only occupy 60% of the plot heigh
 
 p_onlyhighscore_trap <- ggdraw() +
   draw_grob(
@@ -1280,17 +2016,7 @@ p_query_trap <- ggdraw() +
 
 
 
-```{r}
-layout <- "
-AABBDDDD
-AABBDDDD
-FFCCDDDD
-FFCC####
-EEEEEEEE
-EEEEEEEE
-EEEEEEEE
-"
-```
+
 
 
 ```{r}
@@ -1301,13 +2027,36 @@ p_trap
 
 
 ```{r}
-#| fig-width: 14.5
-#| fig-height: 12
-p_before_batch_correct + p_post_batch_correct + p_scoring_umap + p_model_performance + hm + p_trap +
-  plot_layout(design = layout, heights = c(0.7, 0.7, 0.8, 0, 0, 1, 1))
+ht_gg <- ggplotify::as.ggplot(function() {
+  draw(
+    cht,
+    newpage = FALSE,                  
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right"
+  )
+})
+```
 
-ggsave("../output/panel_figure.pdf", height = 12, width = 14.5, bg = "white")
+```{r}
+layout <- "
+AABBDDDD
+AABBDDDD
+FFCCGGGG
+FFCCGGGG
+EEEEEEEE
+EEEEEEEE
+EEEEEEEE
+"
 ```
 
 
+```{r}
+#| fig-width: 15
+#| fig-height: 14
+p_before_batch_correct + p_post_batch_correct + p_scoring_umap + p_model_performance + ht_gg + p_trap + ov_performance +
+  plot_layout(design = layout, heights = c(3.5, 3.5, 5, 2, 1, 5, 1, 2),
+              widths = c(3,1,1,3,3,3,1))
+
+ggsave("../output/panel_figure.pdf", height = 14, width = 15, bg = "white")
+```
 
