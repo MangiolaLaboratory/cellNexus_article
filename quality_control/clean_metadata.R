@@ -12,23 +12,30 @@ cell_metadata <- get_metadata() |>
   # This dataset is removed due to high rates of low quality cells
   filter(assay != "ScaleBio single cell RNA sequencing")
 
-age_groups_tbl = cell_metadata |> distinct(sample_id, age_days, sex) |> 
-  mutate(sex = ifelse(is.na(sex), "unknown", sex)) |> as_tibble() |>
-  mutate(age_groups = coarse_age_bin(age_days, sex),
-         age_groups_fine= age_bin(age_days, sex))
+age_groups_tbl <- cell_metadata |>
+  distinct(sample_id, age_days, sex) |>
+  mutate(sex = ifelse(is.na(sex), "unknown", sex)) |>
+  as_tibble() |>
+  mutate(
+    age_groups = coarse_age_bin(age_days, sex),
+    age_groups_fine = age_bin(age_days, sex)
+  )
 
-cell_metadata = cell_metadata |> 
-  mutate(tissue_groups = ifelse(tissue %in% c("nose skin", "scalp"),
-                                "integumentary system (skin)",
-                                tissue_groups),
-         age_years = age_days/365.25,
-         sex = ifelse(is.na(sex), "unknown", sex),
-         scaled_nCount_RNA = log(nCount_RNA)) |> 
-  left_join(ethnicity_grouped, copy=T ) |> 
-  left_join(assay_data_grouped, copy=T) |> 
-  left_join(disease_data_grouped, copy=T) |>
+cell_metadata <- cell_metadata |>
+  mutate(
+    tissue_groups = ifelse(tissue %in% c("nose skin", "scalp"),
+      "integumentary system (skin)",
+      tissue_groups
+    ),
+    age_years = age_days / 365.25,
+    sex = ifelse(is.na(sex), "unknown", sex),
+    scaled_nCount_RNA = log(nCount_RNA)
+  ) |>
+  left_join(ethnicity_grouped, copy = T) |>
+  left_join(assay_data_grouped, copy = T) |>
+  left_join(disease_data_grouped, copy = T) |>
   left_join(disease_data_grouped_coarse, copy = T) |>
-  left_join(age_groups_tbl, copy = T) |> 
+  left_join(age_groups_tbl, copy = T) |>
   left_join(shorten_technology_label, copy = T)
 
 tissue_group_conversion_tbl <- tibble::tibble(
