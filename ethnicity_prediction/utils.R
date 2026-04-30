@@ -1,0 +1,103 @@
+theme_ning <- function(base_size=14, base_family="sans") {
+  library(grid)
+  library(ggthemes)
+  (theme_foundation(base_size=base_size, base_family=base_family) +
+      theme(plot.title = element_text(face = "bold",
+                                      size = rel(1.2),
+                                      hjust = 0.5,
+                                      margin = ggplot2::margin(0,0,20,0)),
+            text = element_text(),
+            panel.background = element_rect(colour = NA, fill = "white"),
+            plot.background = element_rect(colour = NA, fill = "white"),
+            panel.border = element_rect(colour = "black"),
+            axis.title = element_text(face = "bold",size = rel(1)),
+            axis.title.y = element_text(angle=90,vjust =2),
+            axis.title.x = element_text(vjust = -0.2),
+            axis.text = element_text(),
+            axis.line.x = element_line(colour="black"),
+            axis.line.y = element_line(colour="black"),
+            axis.ticks = element_line(),
+            panel.grid.major = element_line(colour="#f0f0f0"),
+            panel.grid.minor = element_blank(),
+            legend.key = element_rect(colour = NA),
+            legend.position = "bottom",
+            legend.direction = "horizontal",
+            legend.box = "vetical",
+            legend.key.size= unit(0.5, "cm"),
+            #legend.margin = unit(0, "cm"),
+            legend.title = element_text(face="italic"),
+            plot.margin=unit(c(10,5,5,5),"mm"),
+            strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0"),
+            strip.text = element_text(face="bold"),
+      ))
+}
+
+
+ning_colors <- c(
+  "#FFBE7D", "#8E3B5D", "#1B263B", "#778DA9", "#BB3E03",
+  "#D37295", "#0A9396", "#8CD17D", "#FFD700", "#90EE90",
+  "#9B2226", "#E15759", "#9467BD", "#F28E2B", "#2EFEF7",
+  "#EE9B00", "#CA6702", "#94D2BD", "#E9D8A6", "#005F73",
+  "#32CD32", "#C5B0D5", "#3B3B3B", "#000080", "#2F4F4F",
+  "#FF00FF", "#7BA05B", "#AFEEEE", "#FF9D9A", "#BAB0AC",
+  "#59A14F"
+)
+
+ning_colors2 <- c(
+  "#2F4F4F", "#556B2F", "#8FBC8F", "#A0522D", "#CD853F",
+  "#D2691E", "#C71585", "#9932CC", "#4682B4", "#5F9EA0",
+  "#008080", "#20B2AA", "#BDB76B", "#FFD700", "#F4A460",
+  "#DAA520", "#BC8F8F", "#708090", "#3B3B3B", "#1B263B",
+  "#5D4037", "#8E3B5D", "#B8860B", "#C0C0C0", "#778899",
+  "#9B2226", "#CA6702", "#BB3E03", "#6E6E6E", "#EEE8AA"
+)
+
+ning_colors200 <- my_palette_200_shuffled2 <- c(
+  "#3e3e3e", "#f0c273", "#ca6702", "#d1a41d", "#5c5145",
+  "#a7dc41", "#aee088", "#4b5320", "#5a5a5a", "#94d2bd",
+  "#bf7f2b", "#61c2cf", "#cc985f", "#6e6e6e", "#a0522d",
+  "#36beca", "#47c4c7", "#edbd6b", "#5d6d7e", "#e7ae58",
+  "#eab864", "#dcae88", "#9467bd", "#47b7c4", "#6aa85a",
+  "#2b2929", "#a3ea88", "#8e3b5d", "#ab51e3", "#59a14f",
+  "#3c5147", "#728fcb", "#3b3b3b", "#66c2a5", "#b8860b",
+  "#3f40b0", "#b445d2", "#30c5cc", "#bab0ac", "#6a9fca",
+  "#c2dc41", "#ba8f35", "#3a8a44", "#d37295", "#2e5e8c",
+  "#c43fd2", "#5e5e5e", "#3b37ad", "#8391e3", "#b6992d",
+  "#db8831", "#d16e1d", "#6b72d2", "#9369d2", "#9461e8",
+  "#cc9440", "#cd991d", "#e9d8a6", "#778da9", "#64a354",
+  "#c6c688", "#cdd11d", "#36a7b0", "#cddc41", "#8cd17d",
+  "#727272", "#bdaf63", "#415a77", "#dc8888", "#2e4057",
+  "#a0cbe8", "#4e79a7", "#c2cb88", "#cdad1d", "#dca188",
+  "#558f51", "#d7b5a6", "#31b2c4", "#9467bd", "#ffbe7d",
+  "#499894", "#51c4c3", "#2f2f2f", "#f4a460", "#68c3c2",
+  "#e15759", "#9edc41", "#8a4fd2", "#dc9588", "#cd853f",
+  "#005f73", "#3737b2", "#2f4f4f", "#2d8f3c", "#e7b35e",
+  "#20c0cf", "#5b62cd", "#5a9f55", "#6aa85a", "#3b3b3b",
+  "#84bccc", "#8890dc", "#0dbbb6", "#90ad1e", "#af7ac5",
+  "#6aa85a", "#ad1e1e", "#e2a64b", "#4682b4", "#a44ad2",
+  "#2e32a1", "#20b2aa", "#d65841", "#abd61d", "#dbb363",
+  "#11bccb", "#cf7b1d", "#dc8888", "#8070e3", "#ad5e1e",
+  "#b3b3b3", "#e7b35e", "#5457e3", "#7ba05b", "#94d2bd",
+  "#6e6e6e", "#39a6d4", "#f28e2b", "#d6a641", "#2f6a24",
+  "#2bbccc", "#61c4c3", "#4b5320", "#b3b3b3", "#eab864",
+  "#7b3e19", "#f4a460", "#e2a34a", "#b145d2", "#0a9396",
+  "#b9dc41", "#66c2a5", "#eb984e", "#778da9", "#9461e8",
+  "#aee61e", "#9932cc", "#89ad4e", "#cd8a1d", "#6e6e6e",
+  "#a8e588", "#89e7b8", "#6cd0c5", "#006a7f", "#58d68d",
+  "#3b3b3b", "#005f73", "#b07aa1", "#d64141", "#b9a22c",
+  "#d41d1d", "#b3de69", "#a456e3", "#a5dee5", "#af7ac5",
+  "#ab51e3", "#ae924a", "#36beca", "#e7ae58", "#b46a1d",
+  "#7ba05b", "#8968e8", "#d6416e", "#b0dc41", "#8f5de3",
+  "#8890dc", "#edbd6b", "#8c2d26", "#a949e3", "#59a14f",
+  "#3b3b3b", "#d41d1d", "#618d4c", "#499894", "#dc8888",
+  "#ad1dd1", "#3c7d2d", "#fdbe7d", "#9b2226", "#97e9bc",
+  "#e766f4", "#23a7a7", "#d66e41", "#b9d2ad", "#9369d2",
+  "#4e79a7", "#8e3b5d", "#b07aa1", "#f1ce63", "#2f4f4f",
+  "#8c8c8c", "#ff7f50", "#58d68d", "#e9d8a6", "#b6992d",
+  "#bc8f8f", "#47caca", "#7e8ce8", "#99f488", "#8890dc",
+  "#e6a57e", "#0a7a86", "#a7b0ac", "#e7ae58", "#a456e3",
+  "#9491f4", "#e2f0cb", "#bb3e03", "#a5d61d", "#e15759",
+  "#cdd11d", "#33b07a", "#d6bd41", "#bdaf63", "#eab864",
+  "#61c2cf", "#51c4c3", "#ca6702", "#aa7b4a", "#bb3e03",
+  "#e2a34a", "#cddc41", "#b46a1d", "#edbd6b", "#ee9b00"
+)
