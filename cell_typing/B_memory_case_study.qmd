@@ -1,0 +1,682 @@
+---
+title: "Case study on B memory cell for improvement by consensus labels"
+date: 15 Apr 2026
+title-block-banner: true
+author: 
+  - name: Yingnan Gao
+    orcid: 0000-0002-0960-4519
+    email: yingnan.gao@adelaide.edu.au
+    affiliation:
+      - id: sgc
+        name: SAiGENCI, The University of Adelaide
+        
+  - name: Stefano Mangiola
+    orcid: 0000-0001-7474-836X
+    email: stefano.mangiola@adelaide.edu.au
+    affiliation:
+      - ref: sgc
+      - id: weh
+        name: Walter and Eliza Hall Institute
+format: 
+  html:
+    theme: minty
+    df-print: paged
+    code-fold: true
+    code-summary: "Show the code"
+    code-line-numbers: true
+    embed-resources: true
+knitr:
+  opts_chunk: 
+    message: false
+    warning: false
+    echo: false
+comments:
+  hypothesis: 
+    theme: clean
+editor: source
+---
+
+## Identifying candidate conditions for showcasing improvement
+
+To showcase an example of improvement by having refined or corrected cell type labels via ensemble consensus, I downloaded the cellNexus metadata joined by the original CELLxGENE metadata, and read the CELLxGENE unified cell type label dictionary deposited on GitHub.
+
+```{r}
+#| echo: true
+#| results: hide
+#| warning: false
+#| message: false
+#| fig-show: hide
+library(cellNexus)
+library(tidyverse)
+
+# load mappings between cellxgene annotations and our unified cell types
+cellxgene_map = read.csv("/Users/a1239028/Documents/GitHub/HPCell/inst/extdata/immune_map_cellxgene.csv")
+
+# harmonise to the CL nomenclature
+cellxgene_map = cellxgene_map |>
+  select(from, to) |>
+  rename(
+    cell_type = from,
+    unified_celltype = to
+  )
+
+# load cellNexus metadata and only keep high quality cells
+### This will download ~1.5 GB of data if not already cached
+cellNexus_metadata = get_metadata() |> 
+  join_census_table() |> 
+  keep_quality_cells()
+
+```
+
+I tracked the annotation change for cells originally labeled as B cell or B cell subtypes
+in the original CELLxGENE unified cell types through the river plot.
+
+```{r}
+#| echo: true
+#| results: hide
+#| warning: false
+#| message: false
+
+b_mem_alluvial_data = cellNexus_metadata |>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(unified_celltype %in% c("b memory","b naive","plasma","b")) |>
+  mutate(
+    unified_celltype = case_when(
+      unified_celltype %in% c("b memory","b naive","plasma","b") ~ unified_celltype,
+      .default="Other"
+    ),
+    cell_type_unified_ensemble = case_when(
+      cell_type_unified_ensemble %in% c("b memory","b naive","plasma","b") ~ cell_type_unified_ensemble,
+      .default="Other"
+    )
+  ) |>
+  count(unified_celltype,cell_type_unified_ensemble) |>
+  mutate(
+    original_level = case_when(
+      unified_celltype %in% c("b memory","b naive","plasma") ~ "L2",
+      .default= "L1"
+    ),
+    consensus_level = case_when(
+      cell_type_unified_ensemble %in% c("b memory","b naive","plasma") ~ "L2",
+      .default= "L1"
+    )
+  ) |>
+  collect()
+
+b_mem_alluvial_data$cell_type_unified_ensemble = 
+  factor(b_mem_alluvial_data$cell_type_unified_ensemble,
+         levels=c("Other","b","b memory","b naive","plasma"))
+
+b_mem_alluvial_data$unified_celltype = 
+  factor(b_mem_alluvial_data$unified_celltype,
+         levels=c("Other","b","b memory","b naive","plasma"))
+
+library(ggalluvial)
+
+# Immune graph level color scheme
+immune_level_color = c(
+  L0 = "#001959",
+  L1 = "#3B6C55",
+  L2 = "#D29243",
+  L3 = "#F9CCF9"
+)
+
+celltype_level = c("b memory"="L2","b naive"="L2","plasma"="L2","b"="L1","Other"="L1")
+celltype_color = immune_level_color[celltype_level]
+names(celltype_color) = names(celltype_level)
+
+b_mem_alluvial = 
+  ggplot(b_mem_alluvial_data,
+         aes(y = n, axis1 = unified_celltype, axis2 = cell_type_unified_ensemble)) +
+    geom_alluvium(aes(fill = original_level), width = 0.3,alpha=0.75) +
+    geom_stratum(mapping = aes(fill=after_stat(stratum)),width = 0.3) +
+    geom_text(stat = "stratum", mapping = aes(label = after_stat(stratum)),color="white") +
+    scale_x_discrete(limits = c("unified_celltype", "cell_type_unified_ensemble"), expand = c(.05, .05),
+                     labels=c("unified_celltype"="original CELLxGENE",
+                              "cell_type_unified_ensemble" = "ensemble consensus")) +
+    scale_fill_manual(values = c(immune_level_color,celltype_color),name="Level")+
+    scale_y_continuous(breaks=c(0,5e5,1e6,1.5e6,2e6),
+                       labels=sapply(
+                         c("0","5%*%10^5","1%*%10^6","1.5%*%10^6","2%*%10^6"),
+                         function(x){parse(text=x)}))+
+    ylab("Cell count")+
+    theme_minimal()+
+    theme(legend.position = "none")
+
+print(b_mem_alluvial)
+```
+
+It appears that B memory is a good candidate to as it has the highest degree of improvement.
+
+I then counted the number of cells that are labelled as B memory cells within each tissue group and disease condition, and the number of samples that contains these cells within the same tissue group and disease condition, for both the original CELLxGENE annotation and the ensemble consensus annotation.
+
+```{r}
+#| echo: true
+#| results: hide
+#| warning: false
+#| message: false
+#| fig-show: hide
+# a count on samples and cells by tissue and disease condition
+original_disease_tissue_sample_count = cellNexus_metadata|>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(unified_celltype %in% c("b memory","b"),
+         grepl("memory",x = cell_type)) |>
+  count(tissue_groups,sample_id,disease)|>
+  collect()
+
+original_disease_tissue_count = left_join(
+  x = original_disease_tissue_sample_count|>
+    count(tissue_groups,disease,wt=n)|>
+    rename(n_cell=n),
+  y = original_disease_tissue_sample_count|>
+    count(tissue_groups,disease)|>
+    rename(n_sample=n)
+)
+
+original_disease_tissue_count_by_disease = split(
+  original_disease_tissue_count,original_disease_tissue_count$disease)
+
+original_disease_tissue_count_by_tissue = split(
+  original_disease_tissue_count,original_disease_tissue_count$tissue_groups)
+
+consensus_disease_tissue_sample_count = cellNexus_metadata|>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(cell_type_unified_ensemble %in% c("b memory")) |>
+  count(tissue_groups,sample_id,disease)|>
+  collect()
+
+consensus_disease_tissue_count = left_join(
+  x = consensus_disease_tissue_sample_count|>
+    count(tissue_groups,disease,wt=n)|>
+    rename(n_cell=n),
+  y = consensus_disease_tissue_sample_count|>
+    count(tissue_groups,disease)|>
+    rename(n_sample=n)
+)
+
+consensus_disease_tissue_count_by_disease = split(
+  consensus_disease_tissue_count,consensus_disease_tissue_count$disease)
+
+consensus_disease_tissue_count_by_tissue = split(
+  consensus_disease_tissue_count,consensus_disease_tissue_count$tissue_groups)
+```
+
+For healthy samples, I generated a table for tissues that has at least one sample containing B memory cells in both original and ensemble consensus annotation.
+
+```{r}
+#| echo: true
+#| results: hide
+#| warning: false
+#| message: false
+#| fig-show: hide
+# find candidates for DE between tissue in healthy samples 
+healthy_by_tissue_comparison = left_join(
+  original_disease_tissue_count_by_disease$normal |>
+    select(-disease)|> rename(n_cell_original=n_cell,n_sample_original = n_sample),
+  consensus_disease_tissue_count_by_disease$normal|>
+    select(-disease)|> rename(n_cell_consensus=n_cell,n_sample_consensus = n_sample),
+)
+```
+
+```{r}
+#| echo: false
+healthy_by_tissue_comparison |> select(-n_cell_original,-n_cell_consensus) |> 
+  print(n = Inf)
+```
+
+I also generated a table for disease conditions to find potential comparison between healthy samples and disease samples.
+
+```{r}
+#| echo: true
+#| results: hide
+#| warning: false
+#| message: false
+#| fig-show: hide
+# find candidates for DE between healthy and disease in each tissue
+healthy_and_disease_comparison = do.call(rbind,lapply(
+  intersect(names(original_disease_tissue_count_by_tissue),
+            names(consensus_disease_tissue_count_by_tissue)),
+  function(nn){
+    df = left_join(
+      original_disease_tissue_count_by_tissue[[nn]] |>
+        rename(n_cell_original=n_cell,n_sample_original = n_sample),
+      consensus_disease_tissue_count_by_tissue[[nn]]|>
+        rename(n_cell_consensus=n_cell,n_sample_consensus = n_sample),
+    )
+    if(dim(df)[1]<2) return(NULL)
+    return(df)
+  }))
+```
+
+```{r}
+#| echo: false
+healthy_and_disease_comparison|>select(-n_cell_original,-n_cell_consensus) |> 
+  print(n = Inf)
+```
+
+It appears that comparison between blood and fat (adipose) tissues will benefit the most from having the ensemble consensus annotation.
+
+## Pseudo-bulk analysis using original and ensemble consensus annotation
+
+I then conducted pseudo-bulk DE analysis using the R package `tidybulk`. 
+
+To factor out potential batch effects by covariates like datasets and sequencing
+technology, I updated the cellNexus metadata based on a deposited function:
+(https://gist.github.com/stemangiola/8fe6c45b79dd95a200c0fd2314ec57d0).
+
+```{r}
+#| echo: true
+#| fig-show: hide
+
+assay_data_grouped = tribble(
+  ~assay, ~assay_groups,
+  "10x 3' v2", "10x Genomics 3",
+  "10x 3' v3", "10x Genomics 3",
+  "10x 5' v2", "10x Genomics 5",
+  "10x 5' v1", "10x Genomics 5",
+  "MARS-seq", "Plate based Technologies",
+  "10x 3' transcription profiling", "10x Genomics 3",
+  "10x 5' transcription profiling", "10x Genomics 5",
+  "Smart-seq2", "Smart seq",
+  "microwell-seq", "Microwell Technologies",
+  "TruDrop", "TruDrop",
+  "Drop-seq", "Drop based Technologies",
+  "Seq-Well S3", "Microwell Technologies",
+  "GEXSCOPE technology", "Other Technologies",
+  "Seq-Well", "Microwell Technologies",
+  "sci-RNA-seq", "Other Technologies",
+  "10x 3' v1", "10x Genomics 3",
+  "BD Rhapsody Whole Transcriptome Analysis", "Other Technologies",
+  "BD Rhapsody Targeted mRNA", "Other Technologies",
+  "CEL-seq2", "Plate based Technologies",
+  "SPLiT-seq", "Other Technologies",
+  "STRT-seq", "Plate based Technologies",
+  "inDrop", "Drop based Technologies",
+  "Smart-seq v4", "Smart seq",
+  "ScaleBio single cell RNA sequencing", "Other Technologies"
+)
+
+cellNexus_metadata = cellNexus_metadata |>
+  left_join(assay_data_grouped, copy=TRUE)
+
+```
+
+### Case 1: healthy fat vs healthy blood
+
+Because I need pseduo-bulk data aggregated under the original CELLxGENE annotation, I pulled the relevant single-cell data and aggregated them manually for both annotations.
+
+```{r}
+#| echo: true
+#| fig-show: hide
+library(tidybulk)
+library(edgeR)
+library(limma)
+library(variancePartition)
+library(patchwork)
+
+# collect metadata
+original_healthy_fat = cellNexus_metadata |>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(unified_celltype %in% c("b memory","b"),
+         grepl("memory",x = cell_type),
+         disease=="normal",
+         feature_count > 5000,
+         tissue_groups%in%c("adipose tissue")) |>
+  collect()
+
+original_fat_datasets = unique(original_healthy_fat$dataset_id)
+
+original_healthy_blood = cellNexus_metadata |>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(unified_celltype %in% c("b memory","b"),
+         grepl("memory",x = cell_type),
+         disease=="normal",
+         feature_count > 5000,
+         dataset_id %in% !!original_fat_datasets,
+         tissue_groups %in% c("blood")) |>
+  collect()
+
+consensus_healthy_fat = cellNexus_metadata |>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(cell_type_unified_ensemble %in% c("b memory"),
+         disease=="normal",
+         feature_count > 5000,
+         #dataset_id %in% !!original_fat_datasets,
+         assay_groups %in% c("10x Genomics 5","10x Genomics 3"),
+         tissue_groups%in%c("adipose tissue")) |>
+  collect()
+
+consensus_fat_datasets = unique(consensus_healthy_fat$dataset_id)
+
+consensus_healthy_blood = cellNexus_metadata |>
+  left_join(cellxgene_map,copy = TRUE)|>
+  filter(cell_type_unified_ensemble %in% c("b memory"),
+         disease=="normal",
+         feature_count > 5000,
+         dataset_id %in% !!consensus_fat_datasets,
+         tissue_groups %in% c("blood")) |>
+  collect()
+
+original_healthy_fat_vs_blood_SCE = rbind(original_healthy_fat,original_healthy_blood)|>
+  get_single_cell_experiment()
+
+consensus_healthy_fat_vs_blood_SCE = rbind(consensus_healthy_fat,consensus_healthy_blood)|>
+  get_single_cell_experiment()
+
+```
+
+I filtered the aggregated pseudo-bulk data to keep only the features that are abundant
+across 70% of the sample in at least one tissue, and then normalized the gene expression
+counts with method 'TMMwsp'.
+
+```{r}
+#| echo: true
+#| fig-show: hide
+
+# aggregate from single cell data
+as_SE = function(x){
+  rn = rownames(x)
+  x = as(x,"RangedSummarizedExperiment")
+  rownames(x) = rn
+  #colnames(x) = paste0(x@colData$sample_id,"___",x@colData$tissue_groups)
+  return(x)
+}
+
+original_healthy_fat_vs_blood_SE = original_healthy_fat_vs_blood_SCE |>
+  scuttle::aggregateAcrossCells(
+    ids = paste0(original_healthy_fat_vs_blood_SCE@colData$tissue_groups,
+                 "_",original_healthy_fat_vs_blood_SCE@colData$donor_id),
+    statistics = "sum"
+  ) |> as_SE() |>
+  keep_abundant_per_category(formula_design = ~ tissue_groups,
+                minimum_count_per_million = 10,
+                minimum_proportion = 0.7) |>
+  scale_abundance(method = "TMMwsp") #|>
+  #resolve_complete_confounders_of_non_interest(sex,dataset_id,assay_groups)
+
+print(dim(original_healthy_fat_vs_blood_SE))
+
+consensus_healthy_fat_vs_blood_SE = consensus_healthy_fat_vs_blood_SCE |>
+  scuttle::aggregateAcrossCells(
+    ids = paste0(consensus_healthy_fat_vs_blood_SCE@colData$tissue_groups,
+                 "_",consensus_healthy_fat_vs_blood_SCE@colData$donor_id),
+    statistics = "sum"
+  ) |> as_SE() |>
+  keep_abundant_per_category(formula_design = ~ tissue_groups,
+                minimum_count_per_million = 10,
+                minimum_proportion = 0.7) |>
+  scale_abundance(method = "TMMwsp") #|>
+  #resolve_complete_confounders_of_non_interest(sex,dataset_id,assay_groups)
+
+print(dim(consensus_healthy_fat_vs_blood_SE))
+
+```
+
+Then, I conducted differential expression analysis through 'dream()' with a focus on
+coefficients of tissue groups in pseudobulk data aggregated based on original CELLxGENE
+annotation:
+
+```{r}
+#| echo: true
+
+# simplify dataset id and tissue group for contrast names
+simplify_complex_entry_in_colData = function(se,levels){
+  se@colData$tissue_groups_simplified = 
+    paste0("tissue_",as.numeric(factor(se@colData$tissue_groups,levels = levels)))
+  if(is.null(se@colData$dataset_id___altered)){
+    se@colData$dataset_id_simplified = 
+      paste0("dataset_",as.numeric(factor(se@colData$dataset_id)))
+  }else{
+    se@colData$dataset_id_simplified = 
+      paste0("dataset_",as.numeric(factor(se@colData$dataset_id___altered)))
+  }
+  if(is.null(se@colData$assay_groups___altered)){
+    se@colData$assay_groups_simplified = 
+      paste0("assay_",as.numeric(factor(se@colData$assay_groups)))
+  }else{
+    se@colData$assay_groups_simplified = 
+      paste0("assay_",as.numeric(factor(se@colData$assay_groups___altered)))
+  }
+  return(se)
+}
+
+# DE using dream()
+original_healthy_fat_vs_blood_SE = 
+  original_healthy_fat_vs_blood_SE |>
+  simplify_complex_entry_in_colData(levels=c("blood","adipose tissue"))
+
+original_healthy_fat_vs_blood_formula = ~ tissue_groups_simplified + sex + (1|donor_id)
+original_healthy_fat_vs_blood_dge = 
+  original_healthy_fat_vs_blood_SE@assays@data$counts |>
+  DGEList()|>
+  calcNormFactors(method="TMMwsp")
+
+original_healthy_fat_vs_blood_voom = 
+  original_healthy_fat_vs_blood_dge |>
+  voomWithDreamWeights(original_healthy_fat_vs_blood_formula,
+                       original_healthy_fat_vs_blood_SE@colData,
+                       plot = TRUE)
+
+original_healthy_fat_vs_blood_fit = 
+  original_healthy_fat_vs_blood_voom |>
+  dream(original_healthy_fat_vs_blood_formula,
+        original_healthy_fat_vs_blood_SE@colData) |>
+  eBayes()
+
+head(original_healthy_fat_vs_blood_fit$design,3)
+```
+
+and the ensemble consensus annotation:
+
+```{r}
+#| echo: true
+consensus_healthy_fat_vs_blood_SE = 
+  consensus_healthy_fat_vs_blood_SE |>
+  simplify_complex_entry_in_colData(levels=c("blood","adipose tissue"))
+
+consensus_healthy_fat_vs_blood_formula =
+  ~ tissue_groups_simplified + sex + (1|donor_id) + (1|dataset_id_simplified)
+
+consensus_healthy_fat_vs_blood_dge = 
+  consensus_healthy_fat_vs_blood_SE@assays@data$counts |>
+  DGEList()|>
+  calcNormFactors(method="TMMwsp")
+
+consensus_healthy_fat_vs_blood_voom = 
+  consensus_healthy_fat_vs_blood_dge |>
+  voomWithDreamWeights(consensus_healthy_fat_vs_blood_formula,
+                       consensus_healthy_fat_vs_blood_SE@colData,
+                       plot = TRUE)
+
+consensus_healthy_fat_vs_blood_fit = 
+  consensus_healthy_fat_vs_blood_voom |>
+  dream(consensus_healthy_fat_vs_blood_formula,
+        consensus_healthy_fat_vs_blood_SE@colData) |>
+  eBayes()
+
+head(consensus_healthy_fat_vs_blood_fit$design,3)
+
+```
+
+I plotted the distribution of counts per sample and p-values,
+
+```{r}
+#| echo: true
+# Histogram of p-values
+limma::plotDensities(log1p(original_healthy_fat_vs_blood_SE@assays@data$counts_scaled),
+                     legend=FALSE,main="original")
+
+limma::plotDensities(log1p(consensus_healthy_fat_vs_blood_SE@assays@data$counts_scaled),
+                     legend=FALSE,main="consensus")
+
+ori_fat_blood_pval_hist = 
+  original_healthy_fat_vs_blood_fit |>
+  topTable(number = Inf,coef = "tissue_groups_simplifiedtissue_2") |>
+  mutate(
+    annotation_method = factor("original CELLxGENE",
+                               levels=c("original CELLxGENE","ensemble consensus")))
+
+con_fat_blood_pval_hist = 
+  consensus_healthy_fat_vs_blood_fit |>
+  topTable(number = Inf,coef = "tissue_groups_simplifiedtissue_2") |>
+  mutate(
+    annotation_method = factor("ensemble consensus",
+                               levels=c("original CELLxGENE","ensemble consensus")))
+
+b_mem_pval_hist = 
+  rbind(ori_fat_blood_pval_hist,con_fat_blood_pval_hist)|>
+  ggplot() +
+  geom_histogram(mapping = aes(x = P.Value),binwidth = 0.01,fill="darkgrey") +
+  facet_wrap(~annotation_method,ncol=1,nrow=2) +
+  labs(x="P-Value",y="Count")+
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(b_mem_pval_hist)
+```
+
+and the LFC-mean plot for QC.
+
+```{r}
+#| echo: true
+# LFC-mean
+original_healthy_fat_vs_blood_fit |>
+  plotMA(main="original")
+
+consensus_healthy_fat_vs_blood_fit |>
+  plotMA(main="consensus")
+```
+
+Then I selected the top ten up- and down-regulated genes in adipose tissues using both the
+original and the consensus label:
+
+```{r}
+#| echo: true
+#| fig-show: hide
+library(org.Hs.eg.db)
+ori_fat_blood_outcome = ori_fat_blood_pval_hist |>
+  rownames_to_column(var=".feature") |>
+  arrange(adj.P.Val) |> mutate(
+  genename = mapIds(
+    org.Hs.eg.db,
+    keys = .feature,
+    column = "GENENAME",
+    keytype = "ENSEMBL",
+    multiVals = "first"),
+  symbol = mapIds(
+    org.Hs.eg.db,
+    keys = .feature,
+    column = "SYMBOL",
+    keytype = "ENSEMBL",
+    multiVals = "first")
+)
+
+print("original label:")
+
+ori_fat_blood_outcome |>   filter(logFC>0) |>
+  head(10)  |> dplyr::select(genename,symbol,logFC,P.Value,adj.P.Val) |> as.tibble() |> print()
+
+ori_fat_blood_outcome |>   filter(logFC<0) |>
+  head(10)  |> dplyr::select(genename,symbol,logFC,P.Value,adj.P.Val) |> as.tibble() |> print()
+
+con_fat_blood_outcome = con_fat_blood_pval_hist |>
+  rownames_to_column(var=".feature") |>
+  arrange(adj.P.Val) |> mutate(
+  genename = mapIds(
+    org.Hs.eg.db,
+    keys = .feature,
+    column = "GENENAME",
+    keytype = "ENSEMBL",
+    multiVals = "first"),
+  symbol = mapIds(
+    org.Hs.eg.db,
+    keys = .feature,
+    column = "SYMBOL",
+    keytype = "ENSEMBL",
+    multiVals = "first")
+)
+
+print("consensus label:")
+
+con_fat_blood_outcome |>  filter(logFC>0) |>
+  head(10)  |> dplyr::select(genename,symbol,logFC,P.Value,adj.P.Val) |> as.tibble() |> print()
+
+con_fat_blood_outcome |>  filter(logFC<0) |>
+  head(10)  |> dplyr::select(genename,symbol,logFC,P.Value,adj.P.Val) |> as.tibble() |> print()
+```
+
+I checked the volcano plot:
+
+```{r}
+#| echo: true
+# Top residency gene candidates
+
+original_healthy_fat_vs_blood_SE@colData |> as_tibble() |>
+  count(tissue_groups,tissue_groups_simplified)
+
+consensus_healthy_fat_vs_blood_SE@colData |> as_tibble() |>
+  count(tissue_groups,tissue_groups_simplified)
+
+fat_enrich_blood_genes = c(
+"CXCR4","ITGA4","ITGB1","CD44","BCL2",
+"HLA-DRA","CD69","CD74","NFKBIA","TNFAIP3"
+)
+
+# Create volcano plots
+b_mem_volcano_data = 
+  rbind(
+    ori_fat_blood_outcome |>
+    # Add candidate annotation
+    mutate(expectation  = case_when(
+        symbol %in% fat_enrich_blood_genes ~ "Enriched in adipose tissue",
+        .default = "Not candidate"
+        ),
+        label = case_when(
+          symbol %in% fat_enrich_blood_genes ~ symbol,
+          .default = NA
+        ),
+        annotation_method = factor("original CELLxGENE",
+                                   levels=c("original CELLxGENE","ensemble consensus"))
+    ) |> arrange(desc(expectation)),
+    con_fat_blood_outcome |>
+    # Add candidate annotation
+    mutate(expectation  = case_when(
+        symbol %in% fat_enrich_blood_genes ~ "Enriched in adipose tissue",
+        .default = "Not candidate"
+        ),
+        label = case_when(
+          symbol %in% fat_enrich_blood_genes ~ symbol,
+          .default = NA
+        ),
+        annotation_method = factor("ensemble consensus",
+                                   levels=c("original CELLxGENE","ensemble consensus"))
+    ) |> arrange(desc(expectation))
+  )
+
+# Plot
+b_mem_volcano = b_mem_volcano_data |>
+  ggplot(aes(x = logFC, y = P.Value)) +
+  geom_point(aes(color = expectation, size = adj.P.Val < 0.05)) +
+  geom_hline(yintercept = 0.05,color="black",linetype="dashed")+
+  ggrepel::geom_text_repel(aes(label = label), size = 2, max.overlaps = 20) +
+  scale_x_continuous(breaks=seq(-6,6,1))+
+  scale_y_continuous(trans = "log10_reverse",
+                     breaks = 10^seq(-9,0,1),
+                     labels=sapply(seq(-9,0,1),function(x){
+                       parse(text=sprintf("10^%d",x))
+                       })) +
+  scale_color_manual(values = c("Enriched in adipose tissue" = "red","Not candidate" ="grey")) +
+  scale_size_manual(values = c("TRUE" = 0.75, "FALSE" = 0.1)) +
+  facet_wrap(facets=vars(annotation_method),ncol=1,nrow=2,scales="free_y")+
+  theme_minimal() +
+  labs(x="log-FC",y="P-value")
+
+print(b_mem_volcano)
+```
+
+The aggregated result figure for manuscript:
+
+```{r}
+#| echo: true
+b_mem_alluvial + b_mem_pval_hist + b_mem_volcano + plot_layout(ncol = 3,nrow = 1)
+```
