@@ -64,7 +64,7 @@ library(bluster)
 ```
 
 ```{r}
-se <- HDF5Array::loadHDF5SummarizedExperiment("../data/data_10Mar")
+se <- HDF5Array::loadHDF5SummarizedExperiment("pseudobulk_sample")
 
 rd <- as.data.frame(rowData(se)) %>%
   rownames_to_column("gene")
