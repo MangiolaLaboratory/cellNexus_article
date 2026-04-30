@@ -47,7 +47,7 @@ library(tidybulk)
 library(SummarizedExperiment)
 library(SingleCellExperiment)
 library(Seurat)
-source("../../utils/utils.R")
+source("utils.R")
 library(caret)
 library(ggpubr)
 library(yardstick)
@@ -260,7 +260,7 @@ ggplotify::as.ggplot(eth_tissue_heatmap1) +
   plot_layout(ncol = 1, widths = c(1,1)) +
   plot_annotation(tag_levels = "A")
 
-ggsave("../output/ethnicity_tissue_distribution_heatmap.png", width = 10, height = 10, bg = "white")
+ggsave("output/ethnicity_tissue_distribution_heatmap.png", width = 10, height = 10, bg = "white")
 ```
 
 
@@ -324,7 +324,7 @@ p_post_batch_correct <- standR::plotDR(sce, dimred = "UMAP",
 
 p_post_batch_correct
 
-ggsave(p_post_batch_correct, file = "../output/umap_original_adjusted.pdf", width = 8, height = 7)
+ggsave(p_post_batch_correct, file = "output/umap_original_adjusted.pdf", width = 8, height = 7)
 ```
 
 # check umap with uncorrected data
@@ -354,7 +354,7 @@ p_before_batch_correct <- standR::plotDR(sce_ua, dimred = "UMAP",
 
 p_before_batch_correct
 
-ggsave(p_before_batch_correct, file = "../output/umap_original_unadjusted.pdf", width = 8, height = 7)
+ggsave(p_before_batch_correct, file = "output/umap_original_unadjusted.pdf", width = 8, height = 7)
 ```
 
 
@@ -472,7 +472,7 @@ p_scoring_umap <- standR::plotDR(sce, dimred = "UMAP",
 
 p_scoring_umap
 
-ggsave(p_scoring_umap, file = "../output/umap_score.pdf", width = 8, height = 7)
+ggsave(p_scoring_umap, file = "output/umap_score.pdf", width = 8, height = 7)
 ```
 
 
@@ -491,7 +491,7 @@ colData(sce) %>%
   as.data.frame() %>% 
   dplyr::select(c("sample_id", "ethnicity_relabel")) %>% 
   mutate(Filter = ifelse(ethnicity_relabel == "LowConfidenceLabel", TRUE, FALSE)) %>%
-  write_csv("../output/sample_filtering_based_on_ethnicity_clearness.csv")
+  write_csv("output/sample_filtering_based_on_ethnicity_clearness.csv")
 ```
 
 
@@ -553,7 +553,7 @@ p_sus1 <- standR::plotDR(sce, dimred = "UMAP",
 
 p_sus1
 
-ggsave("../output/sus_case_umap.png", width = 11, height = 11, bg = "white")
+ggsave("output/sus_case_umap.png", width = 11, height = 11, bg = "white")
 ```
 
 ```{r}
@@ -609,7 +609,7 @@ p_sus2 <- annotate_figure(p_sus2, top = text_grob("Visualise neighbors of specif
 
 p_sus2
 
-ggsave("../output/sus_case_umap_knn_highlight.png", width = 15, height = 11, bg = "white")
+ggsave("output/sus_case_umap_knn_highlight.png", width = 15, height = 11, bg = "white")
 ```
 
 
@@ -618,7 +618,7 @@ ggsave("../output/sus_case_umap_knn_highlight.png", width = 15, height = 11, bg 
 #| fig-height: 13
 p_sus1 + p_sus2 + plot_layout(ncol = 1, heights = c(1,1)) + plot_annotation(tag_levels = "A")
 
-ggsave("../output/suspicous_sample_qc_umaps.png", width = 7, height = 13, bg = "white")
+ggsave("output/suspicous_sample_qc_umaps.png", width = 7, height = 13, bg = "white")
 ```
 
 
@@ -645,7 +645,7 @@ p_onlyhighscore <- standR::plotDR(sce[, sce$ethnicity_relabel!="LowConfidenceLab
 
 p_onlyhighscore
 
-ggsave(p_onlyhighscore, file = "../output/UMAP_highConfidence.pdf", width = 8, height = 7)
+ggsave(p_onlyhighscore, file = "output/UMAP_highConfidence.pdf", width = 8, height = 7)
 ```
 
 ```{r}
@@ -696,9 +696,9 @@ sce_query_all <- add_training_assays(sce_query_all)
 # output h5ad
 
 ```{r}
-zellkonverter::writeH5AD(sce_all, file = "../data/sce_relabel.h5ad", compression = "gzip")
+zellkonverter::writeH5AD(sce_all, file = "data/sce_relabel.h5ad", compression = "gzip")
 
-sce <- zellkonverter::readH5AD("../data/sce_relabel.h5ad")
+sce <- zellkonverter::readH5AD("data/sce_relabel.h5ad")
 ```
 
 ```{r}
@@ -767,14 +767,14 @@ p_query_umap <- standR::plotDR(sce_query, dimred = "UMAP",
 
 p_query_umap
 
-ggsave(p_query_umap, file = "../output/UMAP_query.pdf", width = 8, height = 7)
+ggsave(p_query_umap, file = "output/UMAP_query.pdf", width = 8, height = 7)
 ```
 
 
 ```{r}
-zellkonverter::writeH5AD(sce_query_all, file = "../data/sce_query.h5ad", compression = "gzip")
+zellkonverter::writeH5AD(sce_query_all, file = "data/sce_query.h5ad", compression = "gzip")
 
-sce_query <- zellkonverter::readH5AD(file = "../data/sce_query.h5ad")
+sce_query <- zellkonverter::readH5AD(file = "data/sce_query.h5ad")
 ```
 
 Now need to run the Classifier_benchmark.ipynb file
@@ -1027,7 +1027,7 @@ ggplot(cv_split_group_plot_df %>% filter(split_scheme == "dataset_id"), aes(x = 
     title = "Train/test group composition across held-out folds"
   )
 
-ggsave("../output/study_held_out_distribution_check.pdf", width = 7, height = 7, bg = "white")
+ggsave("output/study_held_out_distribution_check.pdf", width = 7, height = 7, bg = "white")
 
 cv_split_ethnicity_df <- imap_dfr(
   split_plan_list,
@@ -1074,7 +1074,7 @@ ggplot(cv_split_ethnicity_df %>% filter(split_scheme == "dataset_id"), aes(x = f
     title = "Train/test ethnicity composition across held-out folds"
   )
 
-ggsave("../output/study_held_out_ethnicity_distribution_check.pdf", width = 9, height = 5, bg = "white")
+ggsave("output/study_held_out_ethnicity_distribution_check.pdf", width = 9, height = 5, bg = "white")
 ```
 
 ```{r}
@@ -1140,7 +1140,7 @@ qc_folds <- ggplot(labeltransfer_expr_qc_df %>% filter(split_scheme == "dataset_
 
 qc_folds
 
-ggsave("../output/gene_distribution_each_fold.pdf", width = 12, height = 8, bg = "white")
+ggsave("output/gene_distribution_each_fold.pdf", width = 12, height = 8, bg = "white")
 ```
 
 ```{r}
@@ -1356,7 +1356,7 @@ lt_auc_by_class
 ```
 
 ```{r}
-roc_py <- read_csv("../roc_points.csv") %>%
+roc_py <- read_csv("roc_points.csv") %>%
   mutate(model_display = model) %>%
   mutate(model_display = str_remove(model_display, "_S_")) %>%
   filter(model_display %in% selected_models) %>%
@@ -1369,7 +1369,7 @@ roc_py <- read_csv("../roc_points.csv") %>%
     tpr = tpr
   )
 
-auc_py <- read_csv("../auc_by_class.csv") %>%
+auc_py <- read_csv("auc_by_class.csv") %>%
   mutate(model_display = model) %>%
   mutate(model_display = str_remove(model_display, "_S_")) %>%
   filter(model_display %in% selected_models) %>%
@@ -1470,7 +1470,7 @@ ggplot(roc_one_line_final,
   labs(x = "FPR", y = "TPR", color = "Method", title = "ROC curves (median across CV folds)") +
   theme(legend.position = "none")
 
-ggsave("../output/ROC_all.png", width = 10, height = 10, bg = "white")
+ggsave("output/ROC_all.png", width = 10, height = 10, bg = "white")
 ```
 
 
@@ -1505,7 +1505,7 @@ p_model_performance <- ggplot(roc_one_line_final %>%
 
 p_model_performance
 
-ggsave("../output/roc_performance.pdf", width = 7, height = 5, bg = "white")
+ggsave("output/roc_performance.pdf", width = 7, height = 5, bg = "white")
 ```
 
 
@@ -1527,20 +1527,20 @@ p_model_performance_tho <- ggplot(roc_one_line_final %>%
 
 p_model_performance_tho
 
-ggsave("../output/roc_performance_tho.pdf", width = 13, height = 7, bg = "white")
+ggsave("output/roc_performance_tho.pdf", width = 13, height = 7, bg = "white")
 ```
 
 
 
 ```{r}
-overall_py2 <- read_csv("../overall_performance.csv") %>%
+overall_py2 <- read_csv("overall_performance.csv") %>%
   mutate(model = str_remove(model, "_S_")) %>%
   rename_with(~ gsub("_std$", "_sd", .x)) %>%
   mutate(model_display = model) %>%
   filter(model_display %in% selected_models)
   
 
-pereth_py2 <- read_csv("../pereth_performance.csv") %>%
+pereth_py2 <- read_csv("pereth_performance.csv") %>%
   mutate(model = str_remove(model, "_S_")) %>%
   mutate(
     model_display = model,
@@ -1623,13 +1623,13 @@ ov_performance <- ggplot(overall_long %>%
 
 ov_performance
 
-ggsave("../output/benchmark_overall_performance.pdf", width = 7, height = 3, bg = "white")
+ggsave("output/benchmark_overall_performance.pdf", width = 7, height = 3, bg = "white")
 
 ov_performance +
   theme(legend.position = "right") +
   guides(fill = guide_legend(ncol = 1))
 
-ggsave("../output/benchmark_overall_performance_legend.pdf", width = 7, height = 7, bg = "white")
+ggsave("output/benchmark_overall_performance_legend.pdf", width = 7, height = 7, bg = "white")
 
 
 ```
@@ -1650,7 +1650,7 @@ ov_performance_tho <- ggplot(overall_long %>%
 
 ov_performance_tho
 
-ggsave("../output/benchmark_overall_performance_tho.pdf", width = 8, height = 6, bg = "white")
+ggsave("output/benchmark_overall_performance_tho.pdf", width = 8, height = 6, bg = "white")
 ```
 
 
@@ -1682,7 +1682,7 @@ pppho1 <- ggplot(pereth_long %>%
 
 pppho1
 
-ggsave("../output/benchmark_pereth_performance.png", width = 12, height = 10, bg = "white")
+ggsave("output/benchmark_pereth_performance.png", width = 12, height = 10, bg = "white")
 ```
 
 
@@ -1700,7 +1700,7 @@ pppho2 <- ggplot(pereth_long %>%
 
 pppho2
 
-ggsave("../output/benchmark_pereth_performance_tho.pdf", width = 12, height = 14, bg = "white")
+ggsave("output/benchmark_pereth_performance_tho.pdf", width = 12, height = 14, bg = "white")
 ```
 
 ```{r}
@@ -1710,14 +1710,14 @@ p_model_performance_tho + ov_performance_tho + pppho2 +
   plot_layout(ncol = 1, heights = c(2,2,3)) +
   plot_annotation(tag_levels = "A")
 
-ggsave("../output/benchmark_tho.png", width = 10, height = 15, bg = "white")
+ggsave("output/benchmark_tho.png", width = 10, height = 15, bg = "white")
 ```
 
 
 ```{r}
 pppho1 + pppho2 + plot_layout(ncol = 1)
 
-ggsave("../output/benchmark_models_per_ethnicity.png", width =10, height = 12, bg = "white")
+ggsave("output/benchmark_models_per_ethnicity.png", width =10, height = 12, bg = "white")
 ```
 
 
@@ -1725,7 +1725,7 @@ ggsave("../output/benchmark_models_per_ethnicity.png", width =10, height = 12, b
 # Final prediction results
 
 ```{r}
-final_predictions <- read_csv("../histgbdt_Log1pTMM_S_PCA_query_predictions.csv")
+final_predictions <- read_csv("histgbdt_Log1pTMM_S_PCA_query_predictions.csv")
 
 table(final_predictions$predicted_ethnicity)
 ```
@@ -1823,7 +1823,7 @@ if (length(dropped_marker_genes) > 0) {
   tibble(dropped_marker_gene = dropped_marker_genes)
 }
 
-write_csv(marker_top5_table, "../output/top5_markers_by_ethnicity_dist0CI.csv")
+write_csv(marker_top5_table, "output/top5_markers_by_ethnicity_dist0CI.csv")
 
 cluster_cols <- my_colors
 
@@ -1895,7 +1895,7 @@ cht <- Heatmap(
   bottom_annotation = ta
 )
 
-pdf("../output/Ethnicity_markerG_heatmap_full_ComplexHeatmap.pdf",
+pdf("output/Ethnicity_markerG_heatmap_full_ComplexHeatmap.pdf",
     width = 18, height = 8)
 draw(cht, heatmap_legend_side = "right", annotation_legend_side = "right")
 dev.off()
@@ -2057,6 +2057,6 @@ p_before_batch_correct + p_post_batch_correct + p_scoring_umap + p_model_perform
   plot_layout(design = layout, heights = c(3.5, 3.5, 5, 2, 1, 5, 1, 2),
               widths = c(3,1,1,3,3,3,1))
 
-ggsave("../output/panel_figure.pdf", height = 14, width = 15, bg = "white")
+ggsave("output/panel_figure.pdf", height = 14, width = 15, bg = "white")
 ```
 
