@@ -11,9 +11,9 @@ library(targets)
 library(crew)
 library(crew.cluster)
 library(duckdb)
-directory <- "/vast/scratch/users/shen.m/Census/split_h5ad_based_on_sample_id/2024-07-01/" # MODIFY HERE: directory containing per-sample h5ad files
+directory <- "split_h5ad_based_on_sample_id/2024-07-01/" # MODIFY HERE: directory containing per-sample h5ad files
 sample_anndata <- dir(glue("{directory}"), full.names = T)
-downloaded_samples_tbl <- read_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/census_samples_to_download_groups_MODIFIED.parquet") # MODIFY HERE: input samples metadata parquet
+downloaded_samples_tbl <- read_parquet("metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet") # MODIFY HERE: input samples metadata parquet
 downloaded_samples_tbl <- downloaded_samples_tbl |>
   dplyr::rename(cell_number = list_length) |>
   mutate(
@@ -26,7 +26,7 @@ downloaded_samples_tbl <- downloaded_samples_tbl |>
     )
   )
 
-result_directory <- "/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024" # MODIFY HERE: directory containing the pre-existing targets store for sample_meta
+result_directory <- "metadata_cellxgenedp_Apr_2024" # MODIFY HERE: directory containing the pre-existing targets store for sample_meta
 
 sample_meta <- tar_read(metadata_dataset_id_common_sample_columns, store = glue("{result_directory}/_targets"))
 sample_tbl <- downloaded_samples_tbl |> left_join(CuratedAtlasQueryR::get_metadata(cache_directory = tempdir()) |> dplyr::select(dataset_id, contains("norm")) |>
@@ -72,7 +72,7 @@ sample_tbl <- sample_tbl |>
 
 # Append assay column
 sample_tbl <- sample_tbl |> left_join(
-  cellNexus::get_metadata(cache_directory = "/vast/scratch/users/shen.m/cellNexus") |> # MODIFY HERE: cellNexus local cache directory
+  cellNexus::get_metadata() |> # MODIFY HERE: cellNexus local cache directory
     distinct(sample_id, assay),
   by = c("sample_2" = "sample_id"),
   copy = T
@@ -85,15 +85,15 @@ sample_tbl <- sample_tbl |> mutate(
   feature_thresh = ifelse(assay == "BD Rhapsody Targeted mRNA", 11, 200)
 )
 
-sample_tbl |> saveRDS("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/sample_tbl_2024_Jul.rds") # MODIFY HERE: output path for sample_tbl RDS
+sample_tbl |> saveRDS("sample_tbl_2024_Jul.rds") # MODIFY HERE: output path for sample_tbl RDS
 
 sliced_sample_tbl <-
   sample_tbl |>
   filter(!dataset_id %in% c("99950e99-2758-41d2-b2c9-643edcdf6d82", "9fcb0b73-c734-40a5-be9c-ace7eea401c9")) |>
   dplyr::select(file_name, tier, cell_number, dataset_id, sample_2, method_to_apply, assay, count_upper_bound, feature_thresh)
 
-# Manually updated 301 samples transformation profiles ("./metadata/step5_supp_update_samples_transformation.R")
-sample_summary_df <- tar_read(sample_summary_df, store = "/vast/scratch/users/shen.m/sct_failed_samples_raw_counts_summary_target_store/_targets/") |> # MODIFY HERE: targets store for manually reviewed SCT-failed samples
+# Manually updated samples transformation profiles ("./metadata/step5_supp_update_samples_transformation.R")
+sample_summary_df <- tar_read(sample_summary_df, store = "sct_failed_samples_raw_counts_summary_target_store/_targets/") |> # MODIFY HERE: targets store for manually reviewed SCT-failed samples
   bind_rows() |>
   mutate(max_gt_20 = ifelse(max_val > 20, TRUE, FALSE)) |>
   mutate(sample_id = str_remove(sample_id, ".h5ad"))
@@ -135,18 +135,17 @@ sliced_sample_tbl <- sliced_sample_tbl |>
     !is.na(method_to_apply.y) ~ method_to_apply.y
   ))
 
-sliced_sample_tbl |> saveRDS("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/sliced_sample_tbl_2024_Jul.rds") # MODIFY HERE: output path for sliced_sample_tbl RDS
+sliced_sample_tbl |> saveRDS("sliced_sample_tbl_2024_Jul.rds") # MODIFY HERE: output path for sliced_sample_tbl RDS
 
 # Enable sample_names.rds to store sample names for the input
 sample_names <-
   sliced_sample_tbl |>
   pull(file_name) |>
-  str_replace("/home/users/allstaff/shen.m/scratch", "/vast/scratch/users/shen.m") |>
   set_names(sliced_sample_tbl |> pull(sample_2))
 functions <- sliced_sample_tbl |> pull(method_to_apply)
 feature_thresh <- sliced_sample_tbl |> pull(feature_thresh)
 
-my_store <- "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store" # MODIFY HERE: HPCell targets store (used throughout this script)
+my_store <- "2024-07-01/process_samples_hpcell_target_store" # MODIFY HERE: HPCell targets store (used throughout this script)
 job::job({
   library(HPCell)
 
@@ -218,7 +217,7 @@ job::job({
 # # View target metadata if needed
 # tar_meta(store = my_store) |> filter(!is.na(error)) |>  arrange(desc(time)) |> View()
 # tar_meta(store = my_store) |> filter(!is.na(error)) |> distinct(name, error)
-# tar_meta(starts_with("annotation_tbl_"), store = "/vast/scratch/users/shen.m/cellNexus_target_store") |>
+# tar_meta(starts_with("annotation_tbl_"), store = "2024-07-01/process_samples_hpcell_target_store") |>
 #   filter(!data |> is.na()) |> arrange(desc(time)) |> select(error, name)
 #
 # # Debug cellchat
@@ -256,7 +255,7 @@ job::job({
 #' @function `lighten_annotation`: Processes each annotation table target, unnesting and selecting specific columns to reduce data size.
 #'
 #' @example Usage:
-#'   The pipeline script is saved as `/vast/scratch/users/shen.m/lighten_annotation_tbl_target.R` by tar_script and can be run using `tar_make()`.
+#'   The pipeline script is saved as `lighten_annotation_tbl_target.R` by tar_script and can be run using `tar_make()`.
 tar_script(
   {
     library(dplyr)
@@ -337,7 +336,7 @@ tar_script(
 
     list(
       # The input DO NOT DELETE
-      tar_target(my_store, "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store (must match my_store above)
+      tar_target(my_store, "2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store (must match my_store above)
 
       tar_target(
         target_name,
@@ -360,14 +359,14 @@ tar_script(
       )
     )
   },
-  script = "/vast/scratch/users/shen.m/lighten_annotation_tbl_target_2024_Jul.R",
+  script = "lighten_annotation_tbl_target_2024_Jul.R",
   ask = FALSE
 ) # MODIFY HERE: output path for the tar_script file
 
 job::job({
   tar_make(
-    script = "/vast/scratch/users/shen.m/lighten_annotation_tbl_target_2024_Jul.R", # MODIFY HERE: must match the script path above
-    store = "/vast/scratch/users/shen.m/lighten_annotation_tbl_target_2024_Jul", # MODIFY HERE: targets store for the lighten-annotation pipeline
+    script = "lighten_annotation_tbl_target_2024_Jul.R", # MODIFY HERE: must match the script path above
+    store = "lighten_annotation_tbl_target_2024_Jul", # MODIFY HERE: targets store for the lighten-annotation pipeline
     reporter = "summary"
   )
 })
@@ -383,14 +382,14 @@ library(targets)
 cell_metadata <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_metadata.parquet')")
+    sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/cell_metadata.parquet')")
   ) |>
   mutate(cell_ = paste0(cell_, "___", dataset_id)) |>
   select(cell_, observation_joinid, contains("cell_type"), dataset_id, self_reported_ethnicity, tissue, donor_id, sample_id, is_primary_data, assay)
 
 
 cell_annotation <-
-  tar_read(annotation_tbl_light, store = "/vast/scratch/users/shen.m/lighten_annotation_tbl_target_2024_Jul") |> # MODIFY HERE: lighten-annotation targets store (must match the tar_make store above)
+  tar_read(annotation_tbl_light, store = "lighten_annotation_tbl_target_2024_Jul") |> # MODIFY HERE: lighten-annotation targets store (must match the tar_make store above)
   dplyr::rename(
     blueprint_first_labels_fine = blueprint_first.labels.fine,
     monaco_first_labels_fine = monaco_first.labels.fine,
@@ -404,22 +403,22 @@ cell_annotation <- cell_annotation |> mutate(
 )
 
 empty_droplet <-
-  tar_read(empty_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
+  tar_read(empty_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
   bind_rows() |>
   dplyr::rename(cell_ = .cell)
 
 alive_cells <-
-  tar_read(alive_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
+  tar_read(alive_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
   bind_rows() |>
   dplyr::rename(cell_ = .cell)
 
 doublet_cells <-
-  tar_read(doublet_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
+  tar_read(doublet_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
   bind_rows() |>
   dplyr::rename(cell_ = .cell)
 
 metacell <-
-  tar_read(metacell_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
+  tar_read(metacell_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
   bind_rows() |>
   dplyr::rename(cell_ = cell) |>
   dplyr::rename_with(
@@ -428,7 +427,7 @@ metacell <-
   )
 
 # Save cell type concensus tbl from HPCell output to disk
-cell_type_concensus_tbl <- tar_read(cell_type_concensus_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
+cell_type_concensus_tbl <- tar_read(cell_type_concensus_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> # MODIFY HERE: HPCell targets store (must match my_store above)
   bind_rows() |>
   dplyr::rename(cell_ = .cell)
 
@@ -463,14 +462,14 @@ cell_metadata_joined2 <- cell_metadata_joined |>
   mutate(monaco = ifelse(monaco |> is.na(), "Other", monaco))
 
 cell_metadata_joined2 |>
-  arrow::write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_annotation_2024_Jul.parquet", # MODIFY HERE: output cell annotation parquet (used as input to step6)
+  arrow::write_parquet("cell_annotation_2024_Jul.parquet", # MODIFY HERE: output cell annotation parquet (used as input to step6)
     compression = "zstd"
   )
 
 # Cellchat output
-ligand_receptor_tbl <- tar_read(ligand_receptor_tbl, store = "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store") |> bind_rows() # MODIFY HERE: HPCell targets store (must match my_store above)
+ligand_receptor_tbl <- tar_read(ligand_receptor_tbl, store = "2024-07-01/process_samples_hpcell_target_store") |> bind_rows() # MODIFY HERE: HPCell targets store (must match my_store above)
 # save
-con <- dbConnect(duckdb::duckdb(), dbdir = "~/cellxgene_curated/metadata_cellxgene_mengyuan/cellNexus_lr_signaling_pathway_strength.duckdb") # MODIFY HERE: output DuckDB file for ligand-receptor results
+con <- dbConnect(duckdb::duckdb(), dbdir = "cellNexus_lr_signaling_pathway_strength.duckdb") # MODIFY HERE: output DuckDB file for ligand-receptor results
 duckdb::dbWriteTable(con, "lr_pathway_table", ligand_receptor_tbl, overwrite = TRUE)
 dbDisconnect(con)
 

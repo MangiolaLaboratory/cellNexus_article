@@ -9,8 +9,8 @@ library(stringr)
 library(arrow)
 
 version <- "2024-07-01"
-anndata_path_based_on_dataset_id_to_read <- file.path("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/h5ad/", version)
-anndata_path_based_on_sample_id_to_save <- file.path("/vast/scratch/users/shen.m/Census/split_h5ad_based_on_sample_id/", version)
+anndata_path_based_on_dataset_id_to_read <- file.path("h5ad/", version)
+anndata_path_based_on_sample_id_to_save <- file.path("split_h5ad_based_on_sample_id/", version)
 dir.create(anndata_path_based_on_sample_id_to_save, recursive = TRUE)
 
 files <- list.files(anndata_path_based_on_dataset_id_to_read,
@@ -112,7 +112,7 @@ list(
   tar_target(
     grouped_observation_joinid_per_sample,
     # This should be run
-    read_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/census_samples_to_download_groups_MODIFIED.parquet") |>
+    read_parquet("metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet") |>
       # Note: dataset_id "99950e99-2758-41d2-b2c9-643edcdf6d82" and "9fcb0b73-c734-40a5-be9c-ace7eea401c9"
       #       from Census does not contain any meaningful data (no observation_joinid in colData), thus produced
       #       not meaningful samples (0 cells). They need to be deleted.
@@ -131,11 +131,11 @@ list(
   )
 )
 
-# tar_make(store = glue::glue("~/scratch/Census_final_run/{version}_new/split_h5ad_based_on_sample_id_target_store"),
-#          script = "~/git_control/HPCell/dev/cellnexus-2024-scripts/step4_split_census_anndata_base_on_sample_id.R",
+# tar_make(store = glue::glue("{version}_new/split_h5ad_based_on_sample_id_target_store"),
+#          script = "cellNexus_article/metadata/step4_split_census_anndata_base_on_sample_id.R",
 #          reporter = "summary")
 
 # Debug if needed
-# tar_errored(store = "~/scratch/Census_final_run/split_h5ad_based_on_sample_id_target_store/")
-# tar_meta(store = "~/scratch/Census_final_run/split_h5ad_based_on_sample_id_target_store/") |>
+# tar_errored(store = glue::glue("{version}_new/split_h5ad_based_on_sample_id_target_store"))
+# tar_meta(store = glue::glue("{version}_new/split_h5ad_based_on_sample_id_target_store")) |>
 #   filter(!is.na(error)) |> pull(error)

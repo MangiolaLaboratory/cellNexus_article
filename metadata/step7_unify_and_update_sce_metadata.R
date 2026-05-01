@@ -19,20 +19,20 @@ library(arrow)
 
 
 # Add low confidence ethnicity and imputed ethnicity labels to metadata. Both data are from Ning via email
-lowConf_ethnicity_df <- zellkonverter::readH5AD("/vast/projects/cellxgene_curated/cellNexus/sce_relabel.h5ad", reader = "R", use_hdf5 = T) |>
+lowConf_ethnicity_df <- zellkonverter::readH5AD("sce_relabel.h5ad", reader = "R", use_hdf5 = T) |>
   colData() |>
   as_tibble() |>
   mutate(low_confidence_ethnicity = ifelse(ethnicity_relabel == "LowConfidenceLabel", TRUE, FALSE) |> as.character()) |>
   select(sample_id, ethnicity_flagging_score = score, low_confidence_ethnicity = low_confidence_ethnicity)
 
-imputed_ethnicity_df <- zellkonverter::readH5AD("/vast/projects/cellxgene_curated/cellNexus/adata_unlabelled_with_predictions.h5ad", reader = "R", use_hdf5 = T) |>
+imputed_ethnicity_df <- zellkonverter::readH5AD("adata_unlabelled_with_predictions.h5ad", reader = "R", use_hdf5 = T) |>
   colData() |>
   as_tibble() |>
   select(sample_id, imputed_ethnicity = ethnicity_predictions) |>
   mutate(imputed_ethnicity = as.character(imputed_ethnicity))
 
-# lowConf_ethnicity_df |> arrow::write_parquet("/vast/projects/cellxgene_curated/cellNexus/lowConf_ethnicity_df.parquet")
-# imputed_ethnicity_df |> arrow::write_parquet("/vast/projects/cellxgene_curated/cellNexus/imputed_ethnicity_df.parquet")
+# lowConf_ethnicity_df |> arrow::write_parquet("lowConf_ethnicity_df.parquet")
+# imputed_ethnicity_df |> arrow::write_parquet("imputed_ethnicity_df.parquet")
 
 job::job({
   duckdb_write_parquet <- function(.tbl_sql, path, con) {
@@ -51,7 +51,7 @@ job::job({
   # Single DuckDB connection: do the heavy transforms in SQL (avoid read/write/read on 50M+ rows)
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
 
-  raw_path <- "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_filtered_missing_cells_mengyuan.parquet" # MODIFY HERE: Metadata input parquet path
+  raw_path <- "cell_metadata_cell_type_consensus_v1_5_1_filtered_missing_cells_mengyuan.parquet" # MODIFY HERE: Metadata input parquet path
 
   DBI::dbExecute(con, glue::glue("
   CREATE VIEW cell_metadata_raw AS
@@ -178,14 +178,14 @@ job::job({
   CREATE VIEW lowConf_ethnicity_df AS
   SELECT 
     *
-  FROM read_parquet('/vast/projects/cellxgene_curated/cellNexus/lowConf_ethnicity_df.parquet')
+  FROM read_parquet('lowConf_ethnicity_df.parquet')
 ")
 
   dbExecute(con, "
   CREATE VIEW imputed_ethnicity_df AS
   SELECT 
     *
-  FROM read_parquet('/vast/projects/cellxgene_curated/cellNexus/imputed_ethnicity_df.parquet')
+  FROM read_parquet('imputed_ethnicity_df.parquet')
 ")
 
   # Perform left join and save to parquet
@@ -214,7 +214,7 @@ job::job({
     
     
 
-  ) TO '/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/metadata.2.2.1.parquet'
+  ) TO 'metadata.2.2.1.parquet'
   (FORMAT PARQUET, COMPRESSION 'zstd');
   "
 
@@ -229,7 +229,7 @@ job::job({
 
 x <- tbl(
   dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-  sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/metadata.2.2.1.parquet')")
+  sql("SELECT * FROM read_parquet('metadata.2.2.1.parquet')")
 ) # MODIFY HERE: input metadata parquet path
 
 # Split cell_metadata to cellnexus_metadata, original census_metadata, and metacell_metadata (host Rshiny on smaller file)
@@ -239,7 +239,7 @@ job::job({
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
 
-  input_metadata <- "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/metadata.2.2.1.parquet" # MODIFY HERE: input metadata parquet path
+  input_metadata <- "metadata.2.2.1.parquet" # MODIFY HERE: input metadata parquet path
   out_dir <- "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan"
 
   DBI::dbExecute(

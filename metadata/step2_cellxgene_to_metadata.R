@@ -3,7 +3,7 @@ library(tidyverse)
 library(targets)
 library(glue)
 
-result_directory <- "/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024"
+result_directory <- "metadata_cellxgenedp_Apr_2024"
 
 
 tar_script(
@@ -229,7 +229,7 @@ tar_script(
     }
 
     get_metadata <- function(.x) {
-      cache.path <- "/vast/scratch/users/shen.m/cellxgenedp"
+      cache.path <- "cellxgenedp"
       dir.create(cache.path, recursive = TRUE, showWarnings = FALSE)
 
       h5_path <- .x |> files_download(dry.run = FALSE, cache.path = cache.path)
@@ -423,21 +423,29 @@ library(duckdb)
 
 # Sample metadata
 tar_read(metadata_dataset_id_common_sample_columns, store = glue("{result_directory}/_targets")) |>
-  write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/sample_metadata.parquet", compression = "zstd")
+  write_parquet("metadata_cellxgenedp_Apr_2024/sample_metadata.parquet", compression = "zstd")
 
 # Sample to cell link
 tar_read(metadata_dataset_id_cell_to_sample_mapping, store = glue("{result_directory}/_targets")) |>
-  write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet", compression = "zstd")
+  write_parquet("metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet", compression = "zstd")
 
 # Cell id dictionary
 tar_read(dataset_cell_dict, store = glue("{result_directory}/_targets")) |>
   bind_rows() |>
-  write_parquet("/vast/scratch/users/shen.m/cellNexus/dataset_cell_dict.parquet",
+  write_parquet("dataset_cell_dict.parquet",
     compression = "zstd"
   )
 
 
 get_tissue_grouped <- function(tissue) {
+
+  # Sex-specific tissue entries (gonad differs by donor sex)
+  sex_specific <- tibble::tribble(
+    ~tissue,  ~sex,      ~tissue_groups,
+    "gonad",  "male",    "male reproductive system (other)",
+    "gonad",  "female",  "female reproductive system"
+  )
+
   list(
     # Respiratory System
     "respiratory system" = c(
@@ -567,7 +575,7 @@ get_tissue_grouped <- function(tissue) {
       "skin of temple", "skin of shoulder", "skin of external ear", "skin of trunk",
       "skin of prepuce of penis", "skin epidermis", "arm skin", "lower leg skin",
       "hindlimb skin", "zone of skin", "dermis", "skin of nose", "skin of forehead",
-      "skin of pes", "axilla"
+      "skin of pes", "axilla", "nose skin", "scalp"
     ),
 
     # Gastrointestinal Accessory Organs
@@ -595,13 +603,18 @@ get_tissue_grouped <- function(tissue) {
     "female reproductive system" = c(
       "uterus", "myometrium", "fallopian tube", "ampulla of uterine tube",
       "fimbria of uterine tube", "uterine cervix", "endometrium",
-      "decidua", "decidua basalis", "placenta", "yolk sac", "isthmus of fallopian tube"
+      "decidua", "decidua basalis", "isthmus of fallopian tube"
     ),
     "ovary" = "ovary",
 
+    # Extraembryonic and Placental Structures
+    "extraembryonic and placental structures" = c(
+      "placenta", "yolk sac"
+    ),
+
     # Male Reproductive System
     "male reproductive system (other)" = c(
-      "testis", "gonad"
+      "testis"
     ),
 
     # Prostate
@@ -676,7 +689,9 @@ get_tissue_grouped <- function(tissue) {
     distinct() |>
     unnest(value) |>
     dplyr::rename(tissue = value) |>
-    mutate()
+    mutate(sex = NA_character_) |>
+    bind_rows(sex_specific) |>
+    select(tissue, sex, tissue_groups)
 
   # #check
   # distinct_tissue =
@@ -886,16 +901,16 @@ convert_age_labels_to_days <- function(labels) {
 age_days_tbl <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')")
+    sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')")
   ) |>
   distinct(development_stage) |>
   as_tibble() |>
   mutate(age_days = convert_age_labels_to_days(development_stage))
 
 age_days_tbl |>
-  write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/age_days.parquet")
+  write_parquet("metadata_cellxgenedp_Apr_2024/age_days.parquet")
 
 tissues_grouped <- get_tissue_grouped()
 
 tissues_grouped |>
-  write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/tissue_grouped.parquet")
+  write_parquet("metadata_cellxgenedp_Apr_2024/tissue_grouped.parquet")

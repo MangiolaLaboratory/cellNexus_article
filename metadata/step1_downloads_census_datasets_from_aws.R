@@ -3,7 +3,7 @@
 #
 # Workflow:
 # 1. For every dataset, generate AWS S3 download commands pointing to:
-#       /vast/scratch/users/shen.m/cellNexus/h5ad/<release_date>/
+#       h5ad/<release_date>/
 # 2. Write all download commands into a text file.
 # 3. Create a GNU Parallel bash script that downloads all new datasets efficiently.
 library(cellxgene.census)
@@ -37,19 +37,18 @@ samples <- samples |>
   # Add organism
   mutate(organism = org_name)
 
-samples |> arrow::write_parquet(glue::glue("/vast/scratch/users/shen.m/cellNexus/census_new_datasets_{date}.parquet"),
-                                         compression = "zstd")
+samples |> arrow::write_parquet(glue::glue("census_new_datasets_{date}.parquet"), compression = "zstd")
 
 
 # Set the base path where files will be downloaded
 date <- "2024-07-01"
-path <- file.path("/vast/scratch/users/shen.m/cellNexus/h5ad/", date)
+path <- file.path("h5ad/", date)
+if (!dir.exists(path)) dir.create(path, recursive = TRUE)
+
 h5ads.uri <- get_census_version_directory() |>
   tibble::rownames_to_column("version") |>
   filter(version == date) |>
   pull(h5ads.uri)
-
-if (!dir.exists(path)) dir.create(path, recursive = T)
 
 # Generate the dataset download commands
 # Only new datasets will be downloaded to path
@@ -61,7 +60,7 @@ dataset_ids_path <- samples |>
 
 # Path where the script will be saved
 output_file_path <- glue::glue(
-  "/vast/scratch/users/shen.m/cellNexus/h5ad/{date}_census_dataset_ids_download_path.txt"
+  "h5ad/{date}_census_dataset_ids_download_path.txt"
 )
 
 write.table(
@@ -102,10 +101,10 @@ cat $COMMAND_FILE | parallel -j $PARALLEL_DOWNLOADS --eta --bar --plain --no-not
 ")
 
 # Write the bash script to a file
-writeLines(bash_script, "/vast/scratch/users/shen.m/cellNexus/parallel_download.sh")
+writeLines(bash_script, "parallel_download.sh")
 
 # Change file permission to make it executable
-system("chmod +x /vast/scratch/users/shen.m/cellNexus/parallel_download.sh")
+system("chmod +x parallel_download.sh")
 
 # Execute the bash script
-system("/vast/scratch/users/shen.m/cellNexus/parallel_download.sh")
+system("parallel_download.sh")

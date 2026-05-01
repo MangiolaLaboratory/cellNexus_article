@@ -1,8 +1,8 @@
 library(targets)
 library(tidyverse)
 library(cellNexus)
-store_file_cellNexus <- "/vast/scratch/users/shen.m/targets_prepare_database_split_datasets_chunked_1_4_1_pseudobulk" # MODIFY HERE: targets store directory for this pipeline
-my_store <- "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store" # MODIFY HERE: HPCell targets store to read pseudobulk SCEs from (used throughout)
+store_file_cellNexus <- "targets_prepare_database_split_datasets_chunked_1_4_1_pseudobulk" # MODIFY HERE: targets store directory for this pipeline
+my_store <- "2024-07-01/process_samples_hpcell_target_store" # MODIFY HERE: HPCell targets store to read pseudobulk SCEs from (used throughout)
 
 tar_script(
   {
@@ -223,11 +223,11 @@ tar_script(
 
     list(
       # The input DO NOT DELETE
-      tar_target(my_store, "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store (must match my_store above)
-      tar_target(cache_directory, "/vast/scratch/users/shen.m/cellNexus/cellxgene_2024/0.2.1/pseudobulk", deployment = "main"), # MODIFY HERE: output cache directory for saved pseudobulk anndata files
+      tar_target(my_store, "2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store (must match my_store above)
+      tar_target(cache_directory, "cellNexus/cellxgene_2024/0.2.1/pseudobulk", deployment = "main"), # MODIFY HERE: output cache directory for saved pseudobulk anndata files
       tar_target(
         cell_metadata,
-        "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet", # MODIFY HERE: cell metadata parquet (output of step6/step7)
+        "cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet", # MODIFY HERE: cell metadata parquet (output of step6/step7)
         packages = c("arrow", "dplyr", "duckdb")
       ),
       tar_target(
