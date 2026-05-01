@@ -1090,8 +1090,10 @@ Handles data ingestion and preprocessing orchestration.
 
 ```{r part1_preprocessing, message=TRUE, eval=FALSE}
 ## === Part 1: Preprocessing to obtain train / test / validation ===
-cat("Reading H5AD file...\n")
-se_raw <- zellkonverter::readH5AD("~/Downloads/pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE)
+
+# Download pseudobulk_se.h5ad from https://zenodo.org/records/17060800
+
+se_raw <- zellkonverter::readH5AD("pseudobulk_se.h5ad", reader = "R", use_hdf5 = TRUE)
 
 splits <- preprocess_for_sex_prediction(
   se = se_raw,
@@ -1151,6 +1153,40 @@ if (!is.null(sex_model_results$test_metrics)) {
   cat("\n=== Test Performance ===\n")
   print(sex_model_results$test_metrics)
 }
+```
+
+Write csv results 
+```{r}
+# Load trained model if needed
+if (!exists("sex_model_results")) {
+  sex_model_results <- readRDS("sex_prediction_model.rds")
+}
+
+# Predict sex for all processed pseudobulk samples
+se_all_pred <- predict_sex_for_se(
+  se = splits$se_processed,
+  trained_model = sex_model_results$workflow,
+  my_assay = "singscore",
+  sex_column = "sex"
+)
+
+# Export sample-level predictions
+all_sex_predictions <- colData(se_all_pred) |>
+  as.data.frame() |>
+  as_tibble() |>
+  dplyr::select(
+    sample_id,
+    donor_id,
+    dataset_id,
+    sex,
+    sex_predicted
+  ) |>
+  distinct()
+
+write.csv(all_sex_predictions, "sex_prediction_all_samples.csv", row.names = FALSE)
+
+all_sex_predictions
+
 ```
 
 ### Model performance summary (static notes)
