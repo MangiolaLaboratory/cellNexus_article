@@ -557,7 +557,7 @@ cols <- colnames(se)
 
   # Persist intermediate (optional)
   try({
-    saveRDS(se_pb, "~/Documents/GitHub/article_cellNexus/sex_prediction/pseudobulk_se_X_Y_subset_sample_id.rds")
+    saveRDS(se_pb, "pseudobulk_se_X_Y_subset_sample_id.rds")
   }, silent = TRUE)
 
   # Filter out samples with zero counts
@@ -1105,11 +1105,11 @@ splits <- preprocess_for_sex_prediction(
 )
 
 # Save the splits
-saveRDS(splits, "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_splits.rds")
+saveRDS(splits, "sex_prediction_splits.rds")
 ```
 
 ```{r read splits}
-splits <- readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_splits.rds")
+splits <- readRDS("sex_prediction_splits.rds")
 
 se_train <- splits$se_train
 se_test <- splits$se_test
@@ -1141,7 +1141,7 @@ sex_model_results <- build_sex_prediction_model(
 )
 
 # save model
-saveRDS(sex_model_results, "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_model.rds")
+saveRDS(sex_model_results, "sex_prediction_model.rds")
 
 # Print training metrics
 cat("\n=== Training Performance ===\n")
@@ -1199,7 +1199,7 @@ Evaluates the trained model on the sex-specific validation set and summarizes re
 ```{r part3_validation_application}
 
 # Read models
-sex_model_results = readRDS("~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_model.rds")
+sex_model_results = readRDS("sex_prediction_model.rds")
 
 ## === Part 3: Prediction function and validation application ===
 cat("\n=== Tissue-Specific Validation ===\n")
@@ -1423,7 +1423,7 @@ plot_unknown_prediction <-
     as_tibble() |>
     dplyr::count(tissue_groups, sex_predicted) |>
     arrange(desc(n)) |>
-    write.csv("~/Documents/GitHub/article_cellNexus/sex_prediction/unknown_prediction_counts.csv", row.names = FALSE)
+    write.csv("unknown_prediction_counts.csv", row.names = FALSE)
 
 
 # Use patchwork to combine the plots
@@ -1435,7 +1435,7 @@ p = plot_roc + plot_importance + plot_unknown_prediction
 p = p + plot_layout(guides = "collect")
 
 ggsave(
-  "~/Documents/GitHub/article_cellNexus/sex_prediction/sex_prediction_plots.pdf", 
+  "sex_prediction_plots.pdf", 
   p, units = "mm", 
   width = 90, height = 45, scale = 3
 )
