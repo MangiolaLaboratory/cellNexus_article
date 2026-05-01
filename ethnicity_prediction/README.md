@@ -1,24 +1,82 @@
-# Ethnicity prediction workflow
+# Ethnicity prediction
 
-This directory contains the CellNexus ethnicity-label harmonisation, benchmarking, and prediction workflow. It combines an R/Quarto analysis for marker selection and data export with a Python notebook for classifier benchmarking and final prediction.
-
-## Inputs
-
-A `data_10Mar`.
+This directory contains the CellNexus workflow for ethnicity-label harmonisation, classifier benchmarking, and final query-label prediction.
 
 ## Files
 
-- `Ethnicity_CellNexus.qmd`: score ethnicity labels, selects marker genes, defines reference/query sets, exports `.h5ad` files, runs Seurat `LabelTransfer`, and generates figures.
-- `classifier.ipynb`: benchmarks classifiers under dataset-held-out and tissue-held-out cross-validation, evaluates ROC and per-ethnicity performance, and predicts query labels with the final model.
+- `Ethnicity_CellNexus.qmd`  
+  Main R/Quarto analysis. Loads the processed pseudobulk object, harmonises ethnicity labels, defines high-confidence reference and query sets, exports `.h5ad` files, runs Seurat `LabelTransfer`, and generates manuscript/QC figures.
 
-## Requirements
+- `Classifier_benchmark.ipynb`  
+  Python notebook for benchmarking classifiers under dataset-held-out and tissue-held-out cross-validation, and for generating final query-label predictions.
 
+- `etnicity_pipeline_targets.R`  
+  Optional upstream preprocessing pipeline that regenerates the processed pseudobulk object from source. This is the full reproducibility route, but it currently requires HPC infrastructure.
+
+- `utils.R`  
+  Helper functions used by the Quarto analysis.
+
+- `Ethnicity_CellNexus.pdf`  
+  Example rendered report.
+
+## Run order & fixed inputs
+
+### Recommended route for reviewers
+Use the fixed processed input bundle from Zenodo, then run the Quarto report and notebook locally.
+
+Zenodo input bundle: [Here](https://zenodo.org/records/19917564?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc3NzU1MDQwMiwiZXhwIjoxNzkwNzI2Mzk5fQ.eyJpZCI6Ijc1MjIwYTQ3LTQ0MDAtNDI3YS05MDc4LTg0OTczM2QxMDg4ZSIsImRhdGEiOnt9LCJyYW5kb20iOiI1YTJiOGY0MDg2NWJhNzgwYjljZjI4MDhhYWRmMDk3MSJ9.hs5tbCFG9Wf2Vz5qIfYXLVlF4MJD9AESXYZaOR7CE0PK0Zxj83WGzwHDBC3mtllZx47tfo8oroSa6qr-NIqMSQ)
+
+Place the extracted fixed inputs inside this directory and decompress it before running the workflow. At minimum, the bundle should contain:
+
+- `pseudobulk_sample.zip`
+
+### Execution order
+1. Render `Ethnicity_CellNexus.qmd`  
+   This step creates the analysis-ready reference and query objects and exports:
+   - `data/sce_relabel.h5ad`
+   - `data/sce_query.h5ad`
+
+2. Run `Classifier_benchmark.ipynb`  
+   This step benchmarks models and writes:
+   - `overall_performance.csv`
+   - `pereth_performance.csv`
+   - `roc_points.csv`
+   - `auc_by_class.csv`
+   - `histgbdt_Log1pTMM_S_PCA_query_predictions.csv`
+
+3. Re-render `Ethnicity_CellNexus.qmd`  
+   This updates the final benchmark plots and summary figures using the notebook outputs.
+
+### Full regeneration route
+If you want to regenerate the processed pseudobulk object from source, run `etnicity_pipeline_targets.R` first and then follow the same steps above. This route is optional and mainly intended for full reproduction in the original compute environment.
+
+## Overview
+
+The workflow is organised into three stages:
+
+1. **Pseudobulk preprocessing**  
+   `etnicity_pipeline_targets.R` builds the upstream `targets`/Bayesian modelling workflow and exports a processed HDF5-backed `SummarizedExperiment` object, `pseudobulk_sample/`.
+
+2. **R/Quarto analysis**  
+   `Ethnicity_CellNexus.qmd` loads `pseudobulk_sample/`, harmonises ethnicity labels, selects ethnicity-informative markers, defines high-confidence labels, and prepares reference/query objects for downstream benchmarking.
+
+3. **Python benchmarking and final prediction**  
+   `Classifier_benchmark.ipynb` benchmarks multiple classifiers under both dataset-held-out and tissue-held-out cross-validation and produces final predictions for query samples.
+
+The current final prediction model is:
+
+- `HistGBDT__Log1pTMM_S_PCA`
+
+## Requirements & dependencies
+
+### Core software
 - R >= 4.3
 - Python >= 3.10
 - Quarto
 - Jupyter Notebook or JupyterLab
 
-## Install R packages
+### R packages for `Ethnicity_CellNexus.qmd`
+These are the packages needed for the Quarto report.
 
 ```r
 install.packages(c(
@@ -33,16 +91,14 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 }
 
 BiocManager::install(c(
-  "SummarizedExperiment", "SingleCellExperiment", "edgeR",
-  "DelayedMatrixStats", "HDF5Array", "scater", "standR", "bluster",
-  "BiocNeighbors", "zellkonverter", "org.Hs.eg.db",
-  "ComplexHeatmap", "circlize", "cellNexus"
+  "SummarizedExperiment", "SingleCellExperiment", "DelayedMatrixStats",
+  "HDF5Array", "edgeR", "scater", "standR", "bluster", "BiocNeighbors",
+  "zellkonverter", "org.Hs.eg.db", "ComplexHeatmap", "circlize",
+  "cellNexus"
 ))
-
 ```
 
-## Install Python packages
-
+### Python packages for Classifier_benchmark.ipynb
 ```
 python3 -m venv .venv
 source .venv/bin/activate
@@ -51,39 +107,12 @@ python -m pip install --upgrade pip
 pip install \
   jupyter notebook ipykernel \
   scanpy anndata numpy pandas scipy scikit-learn \
-  matplotlib seaborn torch torchviz
+  matplotlib seaborn torch
 ```
 
-## Run order
-
-1. Render Ethnicity_CellNexus.qmd to create:
-  - data/sce_relabel.h5ad
-  - data/sce_query.h5ad
-
-2. Run classifier.ipynb to create:
-  - overall_performance.csv
-  - pereth_performance.csv
-  - roc_points.csv
-  - auc_by_class.csv
-  - histgbdt_Log1pTMM_S_PCA_query_predictions.csv
-
-3. Re-render Ethnicity_CellNexus.qmd to update figures and summaries using the benchmark outputs.
-
-## Current benchmark
-Models compared:
-  - Logistic regression
-  - Linear SVM
-  - Random forest
-  - HistGradientBoosting
-  - Multilayer perceptron
-  - Seurat LabelTransfer
-
-Cross-validation settings:
-  - dataset-held-out
-  - tissue-held-out
-Final model:
-  - HistGBDT__Log1pTMM_S_PCA
-
-## Notes
-The Quarto document and notebook are coupled: the notebook reads .h5ad files exported by the Quarto workflow, and the Quarto report reads benchmark CSVs written by the notebook.
-This workflow expects project-specific input data and helper code from the full repository layout.
+## Other notes
+The recommended entry point for reviewers is the fixed Zenodo input bundle, not the HPC preprocessing script.
+etnicity_pipeline_targets.R is the full regeneration route, but it currently assumes HPC-oriented infrastructure, including SLURM/crew.cluster, cmdstanr, and access to the original storage configuration.
+The Quarto report and notebook are coupled: the notebook reads .h5ad files generated by the Quarto analysis, and the Quarto analysis reads benchmark CSVs produced by the notebook.
+The latest repository version now includes utils.R locally in this folder, which improves portability of the Quarto workflow.
+If any local support files referenced by the Quarto document are not committed in the repository, include them in the Zenodo input bundle together with pseudobulk_sample/.
