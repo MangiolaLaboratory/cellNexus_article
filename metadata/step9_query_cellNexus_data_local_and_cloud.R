@@ -5,7 +5,7 @@ library(cellNexus)
 library(stringr)
 library(zellkonverter)
 
-cache <- "~/scratch/cache_temp"
+cache <- tempdir()
 
 x <- get_metadata()
 x <- x |>

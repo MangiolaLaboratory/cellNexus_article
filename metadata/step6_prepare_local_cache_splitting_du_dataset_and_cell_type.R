@@ -92,19 +92,19 @@ job::job({
   }
 
   get_file_ids(
-    "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_annotation_2024_Jul.parquet" # MODIFY HERE: input cell annotation parquet
+    "cell_annotation_2024_Jul.parquet" # MODIFY HERE: input cell annotation parquet
   ) |>
-    write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/file_id_cellNexus_single_cell_2024_Jul.parquet") # MODIFY HERE: output file_id parquet
+    write_parquet("file_id_cellNexus_single_cell_2024_Jul.parquet") # MODIFY HERE: output file_id parquet
 
   gc()
 
   con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
 
-  dir.create("/vast/scratch/users/shen.m/duckdb_tmp", showWarnings = FALSE) # MODIFY HERE: duckdb temp directory
+  dir.create("duckdb_tmp", showWarnings = FALSE) # MODIFY HERE: duckdb temp directory
 
   DBI::dbExecute(
     con,
-    "SET temp_directory='/vast/scratch/users/shen.m/duckdb_tmp';" # MODIFY HERE: duckdb temp directory (must match dir.create above)
+    "SET temp_directory='duckdb_tmp';" # MODIFY HERE: duckdb temp directory (must match dir.create above)
   )
 
   # Create a view for cell_annotation in DuckDB
@@ -114,7 +114,7 @@ job::job({
   SELECT 
     CONCAT(cell_, '___', dataset_id) AS cell_,
     * EXCLUDE (cell_, dataset_id_1, X_umap1, X_umap2, sample_placeholder, cell_type)  -- drop original cell_ and dataset_id_1  
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata.parquet')
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/cell_metadata.parquet')
 ")
 
   # MODIFY HERE: cell_annotation parquet path inside the SQL string below
@@ -139,7 +139,7 @@ job::job({
     observation_originalid
 )
   
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_annotation_2024_Jul.parquet')
+  FROM read_parquet('cell_annotation_2024_Jul.parquet')
 ")
 
   # MODIFY HERE: file_id parquet path inside the SQL string below (should match the write_parquet output above)
@@ -154,7 +154,7 @@ job::job({
     sample_id,
     file_id_cellNexus_single_cell,
     file_id_cellNexus_pseudobulk
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/file_id_cellNexus_single_cell_2024_Jul.parquet')
+  FROM read_parquet('file_id_cellNexus_single_cell_2024_Jul.parquet')
 ")
 
   # MODIFY HERE: transformation data frame
@@ -165,7 +165,7 @@ job::job({
     count_upper_bound,
     feature_thresh AS nfeature_expressed_thresh,
     method_to_apply AS inverse_transform
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/sliced_sample_tbl_2024_Jul.parquet')
+  FROM read_parquet('sliced_sample_tbl_2024_Jul.parquet')
 ")
 
   # Perform the left join and save to Parquet
@@ -194,7 +194,7 @@ job::job({
         
       WHERE cell_metadata.dataset_id NOT IN ('99950e99-2758-41d2-b2c9-643edcdf6d82', '9fcb0b73-c734-40a5-be9c-ace7eea401c9') -- (THESE TWO DATASETS DOESNT contain meaningful data - no observation_joinid etc), thus was excluded in the final metadata.
          
-  ) TO  '/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_0_mengyuan.parquet' -- MODIFY HERE: output merged metadata parquet (v1_2_2)
+  ) TO  'cell_metadata_cell_type_consensus_v1_5_0_mengyuan.parquet' -- MODIFY HERE: output merged metadata parquet (v1_2_2)
   (FORMAT PARQUET, COMPRESSION 'gzip');
 "
 
@@ -217,14 +217,14 @@ job::job({
   dbExecute(con, "
   CREATE VIEW cell_metadata AS
   SELECT *
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_0_mengyuan.parquet')
+  FROM read_parquet('cell_metadata_cell_type_consensus_v1_5_0_mengyuan.parquet')
 ")
 
   # MODIFY HERE: cell_id dictionary parquet path inside the SQL string below
   dbExecute(con, "
   CREATE VIEW cell_map AS
   SELECT *
-  FROM read_parquet('/vast/projects//cellxgene_curated/metadata_cellxgene_mengyuan/file_id_cell_id_dict_v1_1_1_Jul_2024.parquet')
+  FROM read_parquet('file_id_cell_id_dict_v1_1_1_Jul_2024.parquet')
 ")
 
   # Perform the left join and save to Parquet
@@ -238,7 +238,7 @@ job::job({
         ON cell_metadata.cell_id = cell_map.cell_id
         AND cell_metadata.file_id_cellNexus_single_cell = cell_map.file_id_cellNexus_single_cell
 
-  ) TO  '/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet' -- MODIFY HERE: output final metadata parquet with new cell IDs (v1_3_2)
+  ) TO  'cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet' -- MODIFY HERE: output final metadata parquet with new cell IDs (v1_3_2)
   (FORMAT PARQUET, COMPRESSION 'gzip');
 "
 
@@ -256,12 +256,12 @@ job::job({
 cell_metadata <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet')")
+    sql("SELECT * FROM read_parquet('cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet')")
   )
 
 library(targets)
 library(tidyverse)
-store_file_cellNexus <- "/vast/scratch/users/shen.m/targets_prepare_database_split_datasets_chunked_1_4_1_single_cell" # MODIFY HERE: targets store directory for this pipeline
+store_file_cellNexus <- "targets_prepare_database_split_datasets_chunked_1_4_1_single_cell" # MODIFY HERE: targets store directory for this pipeline
 
 tar_script(
   {
@@ -803,16 +803,16 @@ tar_script(
 
     list(
       # The input DO NOT DELETE
-      tar_target(my_store, "/vast/scratch/users/shen.m/cellNexus/2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store to read SCEs from
-      tar_target(cache_directory, "/vast/scratch/users/shen.m/cellNexus/cellxgene_2024/0.2.1", deployment = "main"), # MODIFY HERE: output cache directory for saved anndata files
+      tar_target(my_store, "2024-07-01/process_samples_hpcell_target_store", deployment = "main"), # MODIFY HERE: HPCell targets store to read SCEs from
+      tar_target(cache_directory, "cellNexus/cellxgene_2024/0.2.1", deployment = "main"), # MODIFY HERE: output cache directory for saved anndata files
       tar_target(
         cell_metadata,
-        "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet", # MODIFY HERE: final metadata parquet (should match the COPY TO output above)
+        "cell_metadata_cell_type_consensus_v1_5_1_mengyuan.parquet", # MODIFY HERE: final metadata parquet (should match the COPY TO output above)
         packages = c("arrow", "dplyr", "duckdb")
       ),
       tar_target(
         cell_id_dict,
-        "/vast/projects//cellxgene_curated/metadata_cellxgene_mengyuan/file_id_cell_id_dict_v1_1_1_Jul_2024.parquet", # MODIFY HERE: cell_id dictionary parquet
+        "file_id_cell_id_dict_v1_1_1_Jul_2024.parquet", # MODIFY HERE: cell_id dictionary parquet
         packages = c("arrow", "dplyr", "duckdb")
       ),
 
@@ -967,8 +967,8 @@ job::job({
 missing_cells_tbl <- tar_read(missing_cells_tbl, store = store_file_cellNexus) |>
   unnest(missing_cells)
 
-# missing_cells_tbl |> write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cells_to_remove_in_metadata_Jul_2024.parquet")
-missing_cells_tbl <- read_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cells_to_remove_in_metadata_Jul_2024.parquet")
+# missing_cells_tbl |> write_parquet("cells_to_remove_in_metadata_Jul_2024.parquet")
+missing_cells_tbl <- read_parquet("cells_to_remove_in_metadata_Jul_2024.parquet")
 
 filtered_cell_metadata <- cell_metadata |> anti_join(missing_cells_tbl, by = c("file_id_cellNexus_single_cell",
   "new_cell_id" = "cell_id"
@@ -976,6 +976,6 @@ filtered_cell_metadata <- cell_metadata |> anti_join(missing_cells_tbl, by = c("
 
 filtered_cell_metadata |>
   collect() |>
-  arrow::write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cell_metadata_cell_type_consensus_v1_5_1_filtered_missing_cells_mengyuan.parquet",
+  arrow::write_parquet("cell_metadata_cell_type_consensus_v1_5_1_filtered_missing_cells_mengyuan.parquet",
     compression = "zstd"
   ) # MODIFY HERE: output parquet after filtering missing cells

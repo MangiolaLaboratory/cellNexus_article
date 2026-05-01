@@ -12,18 +12,18 @@ library(cellxgene.census)
 library(stringr)
 library(purrr)
 library(duckdb)
-result_directory <- "/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024"
+result_directory <- "metadata_cellxgenedp_Apr_2024"
 
 sample_meta <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')")
+    sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')")
   )
 
 sample_to_cell_primary <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet')")
+    sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet')")
   )
 
 sample_to_cell_primary_human <- sample_to_cell_primary |>
@@ -139,7 +139,7 @@ write_parquet_to_parquet <- function(data_tbl, output_parquet, compression = "gz
 }
 
 sample_to_cell_primary_human_accepted_assay_sample_2 |> 
-  write_parquet_to_parquet("~/scratch/Census_rerun/sample_to_cell_primary_human_accepted_assay_sample_2_modify.parquet")
+  write_parquet_to_parquet("sample_to_cell_primary_human_accepted_assay_sample_2_modify.parquet")
 
 gc()
 
@@ -157,17 +157,17 @@ samples <- metadata$read(
 samples <- samples |>
   as.data.frame() |>
   distinct()
-samples |> write_parquet("~/scratch/Census/census_samples_701.parquet")
+samples |> write_parquet("census_samples_701.parquet")
 
 samples <-
   tbl(
     dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-    sql("SELECT * FROM read_parquet('~/scratch/Census/census_samples_701.parquet')")
+    sql("SELECT * FROM read_parquet('census_samples_701.parquet')")
   )
 
 sample_to_cell_primary_human_accepted_assay_sample_2 <- tbl(
   dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-  sql("SELECT * FROM read_parquet('~/scratch/Census_rerun/sample_to_cell_primary_human_accepted_assay_sample_2_modify.parquet')")
+  sql("SELECT * FROM read_parquet('sample_to_cell_primary_human_accepted_assay_sample_2_modify.parquet')")
 )
 
 census_samples_to_download <- samples |>
@@ -202,7 +202,7 @@ census_samples_to_download <- samples |>
   mutate(sample_2 = if_else(str_detect(sample_2, " "), str_replace_all(sample_2, " ", ""), sample_2))
 
 # For query purpose
-census_samples_to_download |> write_parquet_to_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/census_samples_to_download_MODIFIED.parquet")
+census_samples_to_download |> write_parquet_to_parquet("metadata_cellxgenedp_Apr_2024/census_samples_to_download_MODIFIED.parquet")
 
 
 # This is important: please make sure observation_joinid and cell_ is unique per sample (sample_2) in census_samples_to_download
@@ -219,7 +219,7 @@ census_samples_to_download |>
   summarise(observation_joinid = list(observation_joinid), .groups = "drop") |>
   as_tibble() |>
   mutate(list_length = map_dbl(observation_joinid, length)) |>
-  arrow::write_parquet("/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet")
+  arrow::write_parquet("metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet")
 
 # Establish a connection to DuckDB in memory
 job::job({
@@ -229,31 +229,31 @@ job::job({
   dbExecute(con, "
   CREATE VIEW cell_to_refined_sample_from_Mengyuan AS
   SELECT cell_, observation_joinid, dataset_id, sample_2 AS sample_id, cell_type, cell_type_ontology_term_id
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/census_samples_to_download_MODIFIED.parquet')
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/census_samples_to_download_MODIFIED.parquet')
 ")
 
   dbExecute(con, "
   CREATE VIEW cell_ids_for_metadata AS
   SELECT cell_, observation_joinid, dataset_id, sample_, donor_id
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet')
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/cell_ids_for_metadata.parquet')
 ")
 
   dbExecute(con, "
   CREATE VIEW sample_metadata AS
   SELECT *
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/sample_metadata.parquet')
 ")
 
   dbExecute(con, "
   CREATE VIEW age_days_tbl AS
   SELECT development_stage, age_days
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/age_days.parquet')
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/age_days.parquet')
 ")
 
   dbExecute(con, "
   CREATE VIEW tissue_grouped AS
-  SELECT tissue, tissue_groups
-  FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/tissue_grouped.parquet')
+  SELECT tissue, sex, tissue_groups
+  FROM read_parquet('metadata_cellxgenedp_Apr_2024/tissue_grouped.parquet')
 ")
 
   # Perform optimised joins within DuckDB
@@ -287,8 +287,9 @@ COPY (
 
   LEFT JOIN tissue_grouped
     ON tissue_grouped.tissue = sample_metadata.tissue
+    AND (tissue_grouped.sex IS NULL OR tissue_grouped.sex = sample_metadata.sex)
     
-) TO '/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_metadata.parquet'
+) TO 'metadata_cellxgenedp_Apr_2024/cell_metadata.parquet'
 (FORMAT PARQUET, COMPRESSION 'gzip');
 "
 
@@ -301,7 +302,7 @@ COPY (
 
 cell_metadata <- tbl(
   dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-  sql("SELECT * FROM read_parquet('/vast/projects/cellxgene_curated/metadata_cellxgenedp_Apr_2024/cell_metadata.parquet')")
+  sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/cell_metadata.parquet')")
 )
 
 cell_metadata |>

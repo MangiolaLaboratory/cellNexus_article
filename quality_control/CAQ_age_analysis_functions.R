@@ -542,7 +542,7 @@ edit_covariates_from_stefano <- function(tbl) {
   )
 
   temp_path <- tempdir()
-  system(glue("~/bin/rclone copy box_adelaide:/minh_immune_map_disease/disease_data_grouped_further.csv {temp_path}/"))
+  #system(glue("~/bin/rclone copy box_adelaide:/minh_immune_map_disease/disease_data_grouped_further.csv {temp_path}/"))
 
   disease_data_grouped <-
     disease_data_grouped |>

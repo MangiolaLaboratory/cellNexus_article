@@ -1,7 +1,7 @@
 library(targets)
 library(tidyverse)
 # Get summary table in parallel
-summary_store = "/vast/scratch/users/shen.m/sct_failed_samples_raw_counts_summary_target_store"
+summary_store = "sct_failed_samples_raw_counts_summary_target_store"
 tar_script({
   library(dplyr)
   library(SummarizedExperiment)
