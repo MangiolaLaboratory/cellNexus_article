@@ -20,14 +20,14 @@ and unzipped into this folder as the input file for workflows.
 
 ## Files
 
-- `cell_typing_method.qmd`: score ethnicity labels, selects marker genes, defines reference/query sets, exports `.h5ad` files, runs Seurat `LabelTransfer`, and generates figures.
-- `cell_typing_method.html`: score ethnicity labels, selects marker genes, defines reference/query sets, exports `.h5ad` files, runs Seurat `LabelTransfer`, and generates figures.
-- `cell_typing_results.qmd`: benchmarks classifiers under dataset-held-out and tissue-held-out cross-validation, evaluates ROC and per-ethnicity performance, and predicts query labels with the final model.
-- `cell_typing_results.html`: benchmarks classifiers under dataset-held-out and tissue-held-out cross-validation, evaluates ROC and per-ethnicity performance, and predicts query labels with the final model.
-- `B_memory_case_study.qmd`:
-- `B_memory_case_study.html`:
-- `HCAO_tree.qmd`:
-- `HCAO_tree.html`:
+- `cell_typing_method.qmd`: diagnostic and characteristic of the immune graph and the references
+- `cell_typing_method.html`: associated html report for `cell_typing_method.qmd`
+- `cell_typing_results.qmd`: summary statistics of consensus cell typing
+- `cell_typing_results.html`: associated html report for `cell_typing_results.qmd`
+- `B_memory_case_study.qmd`: showcasing how cellNexus consensus annotation improves pseudobulk analysis
+- `B_memory_case_study.html`: associated html report for `B_memory_case_study.qmd`
+- `HCAO_tree.qmd`: build and annotate alternative immune graph from HCAO and run cell typing with it
+- `HCAO_tree.html`: associated html report for `HCAO_tree.qmd`
 
 ## Requirements
 
@@ -60,12 +60,13 @@ BiocManager::install(c(
 ## Run order
 
 1. Render `cell_typing_method.qmd` to create report and:
-  - PH
+  - TBA
 
 2. Render `cell_typing_results.qmd` to create report and:
-  - PH
+  - TBA
 
 3. Render `B_memory_case_study.qmd` to create report.
 
 4. Render `HCAO_tree.qmd` to create report and:
   - HCAO_immune_graph_vertices.csv
+  - HCAO_immune_graph_edges.csv
