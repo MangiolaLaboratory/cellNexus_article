@@ -40,10 +40,6 @@ abstract: |
 ---
 
 ```{r}
-knitr::opts_knit$set(root.dir = '../../')
-```
-
-```{r}
 library(tidyverse)
 library(duckdb)
 library(arrow)
@@ -62,8 +58,8 @@ library(scico)
 # Load data
 
 ```{r}
-output_parquet = "/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/data_driven_consensus.parquet"
-# output_parquet = "./data/consensus_output.parquet"
+# Download from Zenodo (https://zenodo.org/records/19909778)
+output_parquet = "data_driven_consensus.parquet"
 
 # Read back
 con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
@@ -71,12 +67,13 @@ data_consensus <- tbl(con, sql(paste0("SELECT * FROM read_parquet('", output_par
 ```
 
 ```{r}
-map_files = list.files("./data/graphs", pattern = "immune_map", full.names = TRUE)
+map_files = list.files("graphs", pattern = "immune_map", full.names = TRUE)
 names(map_files) = gsub("immune_map_(.+).csv", "\\1", basename(map_files))
 tbl_maps = map_files |> 
   lapply(read.csv) |> 
-  list_rbind(names_to = "Approach")
-adj_immune = read.csv("./data/graphs/immune_tree.csv", row.names = 1, check.names = FALSE)
+  list_rbind(names_to = "Approach") |>
+  filter(is_immune)
+adj_immune = read.csv("graphs/immune_tree.csv", row.names = 1, check.names = FALSE)
 tbl_immune = adj_immune |> 
   rownames_to_column("from") |> 
   pivot_longer(!from, names_to = "to", values_to = "Approach") |> 
@@ -93,16 +90,17 @@ edgedf = tbl_maps |>
 
 nodedf = edgedf |> 
   rename(name = from) |> 
-  select(!to) |> 
+  select(name,Approach) |> 
   rbind(
     data.frame(
       "name" = rownames(adj_immune),
       "Approach" = "Consensus"
     )
-  ) |> 
-  select(name, Approach)
+  )
   
-graph_from_data_frame(rbind(tbl_immune, edgedf), vertices = nodedf, directed = TRUE) |> 
+graph_from_data_frame(
+  rbind(tbl_immune, edgedf|>select(from,to,Approach)),
+  vertices = nodedf, directed = TRUE) |> 
   as_tbl_graph() |> 
   activate(nodes) |> 
   mutate(
