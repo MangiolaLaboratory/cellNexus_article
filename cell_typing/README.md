@@ -57,7 +57,7 @@ BiocManager::install(c(
   "BiocParallel", "ComplexHeatmap",
   "SummarizedExperiment", "SingleCellExperiment","scuttle",
   "edgeR", "limma", "variancePartition"
-  "org.Hs.eg.db", "cellNexus","vissE"
+  "org.Hs.eg.db", "cellNexus","vissE","celldex"
 ))
 ```
 
@@ -80,3 +80,7 @@ devtools::install_github("stemangiola/CuratedAtlasQueryR")
 4. Render `HCAO_tree.qmd` to create report and:
   - `HCAO_immune_graph_vertices.csv`
   - `HCAO_immune_graph_edges.csv`
+  - `immune_graph_azimuth_to_CL.csv`
+  - `immune_graph_blueprint_to_CL.csv`
+  - `immune_graph_cellxgene_to_CL.csv`
+  - `immune_graph_monaco_to_CL.csv`
