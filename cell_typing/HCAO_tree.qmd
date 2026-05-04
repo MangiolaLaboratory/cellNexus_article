@@ -1,0 +1,708 @@
+---
+title: "Build and annotate Human Cell Atlas Ontology immune graph"
+date: 15 Apr 2026
+title-block-banner: true
+author: 
+  - name: Yingnan Gao
+    orcid: 0000-0002-0960-4519
+    email: yingnan.gao@adelaide.edu.au
+    affiliation:
+      - id: sgc
+        name: SAiGENCI, The University of Adelaide
+        
+  - name: Stefano Mangiola
+    orcid: 0000-0001-7474-836X
+    email: stefano.mangiola@adelaide.edu.au
+    affiliation:
+      - ref: sgc
+      - id: weh
+        name: Walter and Eliza Hall Institute
+format: 
+  html:
+    theme: minty
+    df-print: paged
+    code-fold: true
+    code-summary: "Show the code"
+    code-line-numbers: true
+    embed-resources: true
+knitr:
+  opts_chunk: 
+    message: false
+    warning: false
+    echo: true
+comments:
+  hypothesis: 
+    theme: clean
+editor: source
+---
+
+# Programmatic building of immune graph from Human Cell Atlas Ontology (HCAO)
+
+HCAO inherits Cell Ontology (CL) terms for cell types, and thus we use CL as the
+standard cell type identifier across references.
+
+## Downloading HCAO
+
+The full HCAO can be downloaded as a .owl file and parsed by `rdflib` package in
+R:
+
+```{r}
+library(rdflib)
+library(igraph)
+library(ggraph)
+
+# read Human Cell Atlas Ontology, as of 20260330
+if(!file.exists("hcao.owl")){
+  download.file(
+    url = "https://ontology.archive.data.humancellatlas.org/ontologies/hcao/download",
+    destfile = "hcao.owl") 
+  # md5sum: a1239028@LHDF2W0M6D0, as of 20260330
+}
+hcao = rdf_parse("hcao.owl") 
+```
+
+## Query HCAO for cell types
+
+We query all term pairs with a `subClassOf` relationship, and filtered them to include
+only those CL pairs:
+
+```{r}
+# set query
+ontology.sparql = "
+  PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#>
+  PREFIX oboInOwl:<http://www.geneontology.org/formats/oboInOwl#>
+  PREFIX owl:  <http://www.w3.org/2002/07/owl#>
+  PREFIX obo:  <http://purl.obolibrary.org/obo/>
+  PREFIX skos:<http://www.w3.org/2004/02/skos/core#>
+  SELECT ?child ?parent ?clab ?plab
+  WHERE {
+    ?child rdfs:subClassOf ?parent .
+    ?child rdfs:label ?clab .
+    ?parent rdfs:label ?plab}"
+
+# Extract subclass relationships (edges) for only Cell Ontology (CL)
+hcao.triples = rdf_query(hcao, ontology.sparql)
+hcao.triples = hcao.triples[
+  intersect(grep("http://purl.obolibrary.org/obo/CL",hcao.triples$parent),
+            grep("http://purl.obolibrary.org/obo/CL",hcao.triples$child)),]
+
+# simplify tag
+hcao.df = hcao.triples
+hcao.df$child = sapply(hcao.triples$child,function(x){rev(strsplit(x,"/")[[1]])[1]})
+hcao.df$parent = sapply(hcao.triples$parent,function(x){rev(strsplit(x,"/")[[1]])[1]})
+```
+
+Some CL terms associate with multiple common name labels, and thus have multiple
+entries in the table. We only include the shortest common name.
+
+```{r}
+# remove duplicate labels
+cl_labels = split(c(hcao.df$clab,hcao.df$plab),c(hcao.df$child,hcao.df$parent))
+unique_cl_labels = sapply(cl_labels,function(x){x[which.min(sapply(x,nchar))]})
+hcao.unique.df = unique(hcao.df[,c("child","parent")])
+```
+
+## Building HCAO immune graph
+
+We start from the canonical root of all immune cells in the ontology, CL_0000988
+(hematopoietic cell), to recursively build the immune graph.
+
+```{r, results='hide'}
+# extract immune ontology tree
+cl_root = "CL_0000988" # common root of immune cell (hematopoietic cell)
+nodes_to_parse = cl_root
+hcao_cl_rooted.df = hcao.unique.df[numeric(0),]
+hcao_cl_rooted.df$depth = numeric(0)
+hcao_depth = 1
+while(length(nodes_to_parse)>0){
+  idx = which((hcao.unique.df$parent%in%nodes_to_parse)&(!hcao.unique.df$parent%in%hcao_cl_rooted.df$parent))
+  if(length(idx)<=0) break
+  these_childs = unique(hcao.unique.df$child[idx])
+  these_df = hcao.unique.df[idx,]
+  these_df$depth = hcao_depth
+  hcao_cl_rooted.df = rbind(hcao_cl_rooted.df,these_df)
+  nodes_to_parse = these_childs
+  hcao_depth = hcao_depth+1
+}
+
+# use the shortest label for each ontology term
+hcao_cl_rooted.df$clab=unique_cl_labels[hcao_cl_rooted.df$child]
+hcao_cl_rooted.df$plab=unique_cl_labels[hcao_cl_rooted.df$parent]
+
+# build igraph object for ensemble functions
+hcao.dag = graph_from_data_frame(d = hcao_cl_rooted.df[, c("child", "parent")],
+                                 directed = TRUE)
+V(hcao.dag)$common_label = unique_cl_labels[V(hcao.dag)$name]
+V(hcao.dag)$common_label[is.na(V(hcao.dag)$common_label)] = "non_immune"
+
+# clean up space
+rm(hcao)
+gc()
+```
+
+## Building reference mapping dictionary
+
+In addition to the full HCAO immune graph, we build the dictionary between references
+and HCAO. For BluePrint, we use `celldex` to associate reference annotation
+labels and CL terms.
+
+```{r, results='hide'}
+### Making label to CL/HCAO tree dictionary
+
+# Get blueprint metadata via celldex
+blueprint.data = celldex::BlueprintEncodeData()
+blueprint.labels = split(f = blueprint.data$label.fine, x = blueprint.data$label.ont)
+# check if fine-level label to ontology is one to one
+print(table(sapply(blueprint.labels,function(x){length(unique(x))})))
+# make dictionary
+blueprint_label_fine_to_ont = do.call(
+  rbind,
+  lapply(names(blueprint.labels),function(x){
+    CL = gsub(pattern = ":",replacement = "_",x = blueprint.labels[[x]][1],fixed = TRUE)
+    df = data.frame(from=x,to=CL,is_immune=TRUE)
+    if(!df$to%in%hcao_cl_rooted.df$child) df$to = "not hematopoietic"
+    return(df)
+  })
+)
+# save to file
+write.table(blueprint_label_fine_to_ont,file = "immune_map_blueprint_to_CL.csv",
+            quote = FALSE,row.names = FALSE,col.names = TRUE,sep=",")
+#
+rm(blueprint.data)
+gc()
+
+```
+
+For Monaco, we also use celldex but we manually curate one annotation of Th1/Th17
+to Th17 as the celldex CL annotation is isolated from Th1 or Th17 cells in HCAO
+immune graph.
+
+```{r, results='hide'}
+# Get Monaco metadata via celldex
+monaco.data = celldex::MonacoImmuneData()
+monaco.labels = split(f = monaco.data$label.fine, x = monaco.data$label.ont)
+# check if fine-level label to ontology is one to one
+print(table(sapply(monaco.labels,function(x){length(unique(x))})))
+# make dictionary
+monaco_label_fine_to_ont = do.call(
+  rbind,
+  lapply(names(monaco.labels),function(x){
+    CL = gsub(pattern = ":",replacement = "_",x = monaco.labels[[x]][1],fixed = TRUE)
+    df = data.frame(from=x,to=CL,is_immune=TRUE)
+    if(!df$to%in%hcao_cl_rooted.df$child) df$to = "not hematopoietic"
+    return(df)
+  })
+)
+
+# merge Th1/Th17 cells to Th17 cells based on manual curation of the final HCAO graph
+monaco_label_fine_to_ont$to[
+  which(monaco_label_fine_to_ont$from=="Th1/Th17 cells")] = "CL_0000899"
+
+# save to file
+write.table(monaco_label_fine_to_ont,file = "immune_map_monaco_to_CL.csv",
+            quote = FALSE,row.names = FALSE,col.names = TRUE,sep=",")
+#
+rm(monaco.data)
+gc()
+
+```
+
+For Azimuth, we manually build the dictionary by typing the reference page information
+in a list.
+
+```{r}
+# map Azimuth labels from the reference webpage: https://azimuth.hubmapconsortium.org/references/
+azimuth.labels = list(
+  "B intermediate" = "CL_0000785",
+  "B memory" = "CL_0000787",
+  "B naive" = "CL_0000788",
+  "Plasmablast" = "CL_0000980",
+  "CD4 CTL" = "CL_0000934",
+  
+  "CD4 Naive" = "CL_0000895",
+  "CD4 Proliferating" = "CL_0000896",
+  "CD4 TCM" = "CL_0000897",
+  "CD4 TEM" = "CL_0001044",
+  "Treg" = "CL_0000815",
+  
+  "CD8 Naive" = "CL_0000900",
+  "CD8 Proliferating" = "CL_0000906",
+  "CD8 TCM" = "CL_0000909",
+  "CD8 TEM" = "CL_0001050",
+  "ASDC" = "CL_0000451",
+  
+  "cDC1" = "CL_0002394",
+  "cDC2" = "CL_0002399",
+  "pDC" = "CL_0000784",
+  "CD14 Mono" = "CL_0002057",
+  "CD16 Mono" = "CL_0002396",
+  
+  "NK" = "CL_0000939",
+  "NK Proliferating" = "CL_0000623",
+  "NK_CD56bright" = "CL_0000938",
+  "Eryth" = "CL_0000764",
+  "HSPC" = "CL_0008001",
+  
+  "ILC" = "CL_0001065",
+  "Platelet" = "CL_0000233",
+  "dnT" = "CL_0000935",
+  "gdT" = "CL_0000798",
+  "MAIT" = "CL_0000940"
+)
+
+# make dictionary
+azimuth_label_fine_to_ont = do.call(
+  rbind,
+  lapply(names(azimuth.labels),function(x){
+    CL = gsub(pattern = ":",replacement = "_",x = azimuth.labels[[x]][1],fixed = TRUE)
+    df = data.frame(from=x,to=CL,is_immune=TRUE)
+    if(!df$to%in%hcao_cl_rooted.df$child) df$to = "not hematopoietic"
+    return(df)
+  })
+)
+
+# save to file
+write.table(azimuth_label_fine_to_ont,file = "immune_map_azimuth_to_CL.csv",
+            quote = FALSE,row.names = FALSE,col.names = TRUE,sep=",")
+```
+
+## Simplifying HCAO immune graph
+
+We check the overall shape of the HCAO immune graph and how references mapped to it.
+
+```{r}
+# check mapped vertices by the 3 references
+V(hcao.dag)$azimuth_mapped = V(hcao.dag)$name %in% azimuth_label_fine_to_ont$to
+V(hcao.dag)$blueprint_mapped = V(hcao.dag)$name %in% blueprint_label_fine_to_ont$to
+V(hcao.dag)$monaco_mapped = V(hcao.dag)$name %in% monaco_label_fine_to_ont$to
+V(hcao.dag)$mapped_by = mapply(
+  FUN=function(...){
+    txt = paste0(c("azimuth","blueprint","monaco")[c(...)],collapse="_")
+    if(nchar(txt)<=0) txt = "none"
+    return(txt)
+    },
+  V(hcao.dag)$azimuth_mapped,V(hcao.dag)$blueprint_mapped,V(hcao.dag)$monaco_mapped)
+V(hcao.dag)$is_mapped = mapply(
+  any,
+  V(hcao.dag)$azimuth_mapped,V(hcao.dag)$blueprint_mapped,V(hcao.dag)$monaco_mapped)
+
+# mapping color/shape scheme
+mapped_color = c(
+  "azimuth" = "#e41a1c",
+  "blueprint" = "#377eb8",
+  "monaco" = "#FFD700",
+  "azimuth_blueprint" = "#984ea3",
+  "azimuth_monaco" = "#ff7f00",
+  "blueprint_monaco" = "#4daf4a",
+  "azimuth_blueprint_monaco" = "black",
+  "none" = "grey"
+)
+mapped_shape = c("TRUE"=16,"FALSE"=1)
+
+# visualization of the mapped DAG
+hcao.dag.plot = ggraph(hcao.dag,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=mapped_by,shape=is_mapped),size=2) +
+  scale_color_manual(values = mapped_color)+
+  scale_shape_manual(values = mapped_shape)+
+  theme_void()
+print(hcao.dag.plot)
+```
+
+The full HCAO immune graph is messy and the references have not currently reached
+the bottom vertices. As a result, we need to simplify the HCAO immune graph for
+practical use of it. Briefly, for each mapped vertex we select the path to the
+root that goes through the most mapped vertices and aggregate them as the simplified
+HCAO immune graph, with a few exceptions for inclusion/exclusion based on manual
+curation of the outcome.
+
+```{r}
+### Refine tree to mostly azimuth/blueprint/monaco mapped vertices and resolve multi-parent issues
+# also generate the dictionary of cellxgene CL labels to vertices in HCAO DAG
+
+# get all paths to the root
+all_paths_to_root = lapply(V(hcao.dag)$name,function(v){
+  lapply(all_simple_paths(graph = hcao.dag,from = v,to = "CL_0000988"),as_ids)
+})
+names(all_paths_to_root) = V(hcao.dag)$name
+
+# preferred vertices to keep in the DAG from manual curation
+preferred_vertices = c(
+  "CL_0000814", # natural killer T-cell that is not mapped by any reference
+  "CL_0000097"  # mast cell that is not mapped by any reference
+  )
+
+# Vertices that should be avoided unless they are the only vertices leading to mapped ones
+avoided_vertices = c(
+  "CL_0000145", # professional antigen presenting cell
+  "CL_1001610", # bone marrow hematopoietic cell
+  "CL_0000081"  # blood cell that is synonymous to leukocyte
+)
+
+# which vertices are mapped by at least one reference
+mapped_vertices = V(hcao.dag)$name[V(hcao.dag)$is_mapped]
+
+# calculate the minimal required vertices for the DAG without multiple parent
+minimal_edges = unique(do.call(
+  rbind,lapply(c(mapped_vertices,preferred_vertices),function(x){
+    these_paths = all_paths_to_root[[x]]
+    should_avoid = sapply(these_paths,function(xx){any(xx%in%avoided_vertices)})
+    if(sum(!should_avoid)>0) these_paths = these_paths[!should_avoid]
+    path_lengths = sapply(these_paths,length)
+    path_mapped_length = sapply(these_paths,function(xx){
+      sum(xx%in%mapped_vertices)
+    })
+    path_unmapped_length = path_lengths - path_mapped_length
+    minimum_length = min(path_lengths)
+    max_mapped_length = max(path_mapped_length)
+    min_unmapped_length = min(path_unmapped_length)
+    ###  adjustable criteria
+    candidate_paths = these_paths[path_mapped_length>=max_mapped_length]
+    secondary_checked_length = sapply(candidate_paths,length)
+    kept_path = candidate_paths[[which.min(secondary_checked_length)]]
+    ###
+    df = data.frame(
+      from = kept_path[-length(kept_path)],
+      to = kept_path[-1]
+    )
+    return(df)
+  })
+))
+minimal_vertices = unique(c(minimal_edges$from,minimal_edges$to))
+
+# add exception of non-immune cells to metadata
+hcao_cl_metadata.df = data.frame(name=c("not hematopoietic",minimal_vertices))
+
+# build simplified DAG
+hcao.simplified.dag = graph_from_data_frame(
+  d = minimal_edges,
+  vertices = hcao_cl_metadata.df,
+  directed = TRUE)
+```
+
+From the simplified HCAO immune graph, we build the dictionary between the original
+CELLxGENE annotation and HCAO immune graph.
+
+```{r}
+# build cellxgene to HCAO dictionary
+cellxgene_CL_to_ont = data.frame(
+  from=V(hcao.dag)$name,
+  to=sapply(V(hcao.dag)$name,function(x){
+    if(x%in%minimal_vertices) return(x)
+    these_paths = all_paths_to_root[[x]]
+    nearest_vertex_idx = which.min(
+      sapply(these_paths,function(xx){
+        min(which(xx%in%minimal_vertices))-1
+        }))
+    y = these_paths[[nearest_vertex_idx]][these_paths[[nearest_vertex_idx]]%in%minimal_vertices]
+    return(y[1])
+  }),
+  is_immune=TRUE)
+
+write.table(cellxgene_CL_to_ont,file = "immune_map_cellxgene_to_CL.csv",
+            quote = FALSE,row.names = FALSE,col.names = TRUE,sep=",")
+
+```
+
+## QC of HCAO immune graph
+
+We check the HCAO immune graph visually to make sure it makes the best biological
+sense.
+
+```{r}
+# count child-parent for each vertex for validation
+child_parent_count = do.call(
+  rbind,
+  lapply(minimal_vertices,
+         function(x){
+           data.frame(node=x,
+                      num_parent=degree(hcao.simplified.dag,x,mode = "out"),
+                      num_child =degree(hcao.simplified.dag,x,mode = "in"))
+         }))
+
+# check mapped vertices by the 3 references
+V(hcao.simplified.dag)$azimuth_mapped = V(hcao.simplified.dag)$name %in% azimuth_label_fine_to_ont$to
+V(hcao.simplified.dag)$blueprint_mapped = V(hcao.simplified.dag)$name %in% blueprint_label_fine_to_ont$to
+V(hcao.simplified.dag)$monaco_mapped = V(hcao.simplified.dag)$name %in% monaco_label_fine_to_ont$to
+V(hcao.simplified.dag)$mapped_by = mapply(
+  FUN=function(...){
+    txt = paste0(c("azimuth","blueprint","monaco")[c(...)],collapse="_")
+    if(nchar(txt)<=0) txt = "none"
+    return(txt)
+  },
+  V(hcao.simplified.dag)$azimuth_mapped,V(hcao.simplified.dag)$blueprint_mapped,V(hcao.simplified.dag)$monaco_mapped)
+V(hcao.simplified.dag)$is_mapped = mapply(
+  any,
+  V(hcao.simplified.dag)$azimuth_mapped,V(hcao.simplified.dag)$blueprint_mapped,V(hcao.simplified.dag)$monaco_mapped)
+
+# add common name label as attribute
+V(hcao.simplified.dag)$label = unique_cl_labels[V(hcao.simplified.dag)$name]
+V(hcao.simplified.dag)$label[is.na(V(hcao.simplified.dag)$label)] = "non immune"
+
+# visual check
+hcao.simp.dag.plot = ggraph(hcao.simplified.dag,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=mapped_by,shape=is_mapped),size=2) +
+  #geom_node_text(mapping=aes(label=label,color=mapped_by),nudge_y = 0.1)+
+  scale_color_manual(values = mapped_color)+
+  scale_shape_manual(values = mapped_shape)+
+  scale_x_continuous(expand = c(0.1,0.1))+
+  theme_void()
+print(hcao.simp.dag.plot)
+```
+
+## Mapping levels from heuristic immune graph
+
+We reverse the direction of edges for compatibility with the heuristic immune graph.
+
+```{r}
+HCAO_graph = reverse_edges(hcao.simplified.dag)
+```
+
+We then read the heuristic immune graph and label each node by its level.
+
+```{r}
+# load knowledge graph
+adj_immune = read.csv("graphs/immune_tree.csv", row.names = 1, check.names = FALSE) |>
+  as.matrix()
+immune_graph = graph_from_adjacency_matrix(adj_immune, mode = "directed", weighted = TRUE)
+
+# Hierarchy - true (known) hierarchical relationships
+# Consensus-only - temporary relationship used for ambiguous or often confused classes (e.g. macrophages and monocytes are often considered a single class but macrophages are not monocytes)
+E(immune_graph)$Type = ifelse(E(immune_graph)$weight == 1, "Hierarchy", "Consensus-only")
+E(immune_graph)$weight = 1
+
+# Manually curate the graph based on the manuscript
+curated_immune_graph = delete_edges(immune_graph,incident(immune_graph, "cytotoxic", mode="out"))
+
+#
+immune_graph_to_root = lapply(V(curated_immune_graph)$name,function(nn){
+  as_ids(ego(graph = curated_immune_graph,order = -1,nodes = nn,mode = "in")[[1]])
+})
+
+#
+immune_graph_strata = data.frame(
+  label=sapply(immune_graph_to_root,function(x){x[1]}),
+  level=paste0("L",sapply(immune_graph_to_root,length)-1))
+
+# Add level to vertex metadata
+V(immune_graph)$level = immune_graph_strata$level[match(V(immune_graph)$name,immune_graph_strata$label)]
+V(curated_immune_graph)$level = immune_graph_strata$level[match(V(curated_immune_graph)$name,immune_graph_strata$label)]
+
+#
+immune_graph_edges = igraph::as_data_frame(immune_graph,what="edges")
+immune_graph_vertices = igraph::as_data_frame(immune_graph,what="vertices")
+
+curated_immune_graph_edges = igraph::as_data_frame(curated_immune_graph,what="edges")
+curated_immune_graph_vertices = igraph::as_data_frame(curated_immune_graph,what="vertices")
+
+# Immune graph level color scheme
+immune_level_color = c(
+  L0 = "#001959",
+  L1 = "#3B6C55",
+  L2 = "#D29243",
+  L3 = "#F9CCF9"
+)
+
+ggraph(curated_immune_graph,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=level),size=3) +
+  geom_node_text(mapping=aes(label=name,color=level),nudge_y = 0.1)+
+  scale_color_manual(values = immune_level_color)+
+  scale_x_continuous(expand = c(0.1,0.1))+
+  theme_void()
+```
+
+The mapping of heuristic immune graph level is manually done, with the exclusion
+of cytotoxic and natural killer T cell.
+
+```{r}
+# Manual mapping of immune graph levels to HCAO immune graph
+## cytotoxic and nkt were removed based on manual curation
+immune_graph_to_HCAO_graph = c(
+  "b" = "CL_0000945",
+  "b memory" = "CL_0000787",
+  "b naive" = "CL_0000788",
+  "plasma" = "CL_0000786",
+  "ilc" = "CL_0001065",
+  "nk" = "CL_0000623",
+  "t" = "CL_0000084",
+  "t cd4" = "CL_0000624",
+  "cd4 naive" = "CL_0000895",
+  "cd4 tcm" = "CL_0000904",
+  "cd4 tem" = "CL_0000905",
+  "cd4 fh em"="CL_0002038",
+  "cd4 th1/th17 em"="CL_0000912",
+  "cd4 th1 em" = "CL_0000545",
+  "cd4 th2 em" = "CL_0000546",
+  "cd4 th17 em" = "CL_0000899",
+  "t cd8" = "CL_0000625",
+  "cd8 naive" = "CL_0000900",
+  "cd8 tcm" = "CL_0000907",
+  "cd8 tem" = "CL_0000913",
+  "tgd" = "CL_0000798",
+  "treg" = "CL_0000815",
+  "mait" = "CL_0000940",
+  "erythrocyte" = "CL_0000764",
+  "granulocyte" = "CL_0000094",
+  "monocytic" = "CL_0000576",
+  "cd14 mono" = "CL_0000860",
+  "cd16 mono" = "CL_0000875",
+  "dc" = "CL_0000451",
+  "cdc" = "CL_0000782",
+  "pdc" = "CL_0000784",
+  "macrophage" = "CL_0000235",
+  "mast" = "CL_0000097",
+  "progenitor" = "CL_0008001",
+  "non immune" = "not hematopoietic"
+)
+
+# Add mapped level to the HCAO immune graph
+HCAO_graph_strata = data.frame(
+  label=unname(immune_graph_to_HCAO_graph[immune_graph_strata$label]),
+  level=immune_graph_strata$level
+  )
+HCAO_graph_strata = HCAO_graph_strata[!is.na(HCAO_graph_strata$label),]
+V(HCAO_graph)$level = HCAO_graph_strata$level[
+  match(V(HCAO_graph)$name,HCAO_graph_strata$label)
+]
+V(HCAO_graph)$n_level = as.numeric(gsub("\\D+", "", V(HCAO_graph)$level))
+
+# Visualize to check
+mapped_shape = c("TRUE"=16,"FALSE"=1)
+ggraph(HCAO_graph,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=level,shape=is_mapped),size=3) +
+  #geom_node_text(mapping=aes(label=label,color=level),nudge_y = 0.1)+
+  scale_color_manual(values = immune_level_color)+
+  scale_shape_manual(values = mapped_shape)+
+  scale_x_continuous(expand = c(0.1,0.1))+
+  theme_void()
+```
+
+Now we fill-in the gap between mapped levels in HCAO graph.
+
+```{r}
+# prepare to hierarchically fill-in level for vertices that are not mapped
+all_path_to_root = lapply(V(HCAO_graph)$name,function(x){
+  lapply(ego(HCAO_graph,order = -1,mode = "in",nodes = x),as_ids)
+})
+names(all_path_to_root) = V(HCAO_graph)$name
+
+all_children_by_node = lapply(V(HCAO_graph)$name,function(x){
+  V(HCAO_graph)$name[sapply(all_path_to_root,function(xx){
+    any(sapply(xx,function(xxx){x%in%xxx}))
+  })]
+})
+names(all_children_by_node) = V(HCAO_graph)$name
+
+all_sisters_by_node = lapply(V(HCAO_graph)$name,function(x){
+  setdiff(lapply(ego(HCAO_graph,order = 1,mode = "out",nodes = x),as_ids)[[1]],x)
+})
+names(all_sisters_by_node) = V(HCAO_graph)$name
+
+
+# fill-in parental vertices (0>1>2)
+for(this_level in 0:2){
+  level_mapping=V(HCAO_graph)$n_level
+  names(level_mapping) = V(HCAO_graph)$name
+  vertices_with_level = V(HCAO_graph)$name[which(V(HCAO_graph)$n_level==this_level)]
+  parent_until_higher_level = unique(do.call(c,lapply(
+    vertices_with_level,
+    function(x){
+      vv = all_path_to_root[[x]][[1]]
+      v2f = vv[which(is.na(level_mapping[vv]))]
+      return(v2f)
+    }
+  )))
+  level_mapping[parent_until_higher_level] = this_level
+  V(HCAO_graph)$n_level = unname(level_mapping)
+}
+V(HCAO_graph)$level = sapply(V(HCAO_graph)$n_level,function(x){
+  if(is.na(x)) return(NA)
+  return(paste0("L",x))
+})
+
+# Visualize to check again
+ggraph(HCAO_graph,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=level,shape=is_mapped),size=3) +
+  #geom_node_text(mapping=aes(label=label,color=level),nudge_y = 0.1)+
+  scale_color_manual(values = immune_level_color)+
+  scale_shape_manual(values = mapped_shape)+
+  scale_x_continuous(expand = c(0.1,0.1))+
+  theme_void()
+```
+
+The remaining unmapped vertices are addressed by their latest mapped ancestors.
+
+```{r}
+# now fill-in vertices not mapped and without mapped descendents at level 0-2
+vertices_to_fill = V(HCAO_graph)$name[is.na(V(HCAO_graph)$n_level)]
+#print(length(vertices_to_fill))
+while(length(vertices_to_fill)>0){
+  for(this_vertex in vertices_to_fill){
+    immediate_parent = all_path_to_root[[this_vertex]][[1]][2]
+    # skip if parent not mapped
+    if(immediate_parent%in%vertices_to_fill) next
+    # prioritize for L0 parent to produce L1 children
+    if(level_mapping[immediate_parent]<=0){
+      level_mapping[this_vertex] = 1
+      next
+    }
+    # if has mapped sister, use sisters' finest level
+    if(length(all_sisters_by_node[[immediate_parent]])>1){
+      # ^check if has sister
+      # check if any sister is mapped
+      sister_level = level_mapping[all_sisters_by_node[[immediate_parent]]]
+      sister_level = sister_level[!is.na(sister_level)]
+      # use finest level when mapped 
+      if(length(sister_level)>0){
+        level_mapping[this_vertex] = max(sister_level)
+        next
+      }
+      # fill-in as single child when not mapped
+    }
+    # +1 if itself is mapped to a reference and +0 if not
+    if(V(HCAO_graph)$is_mapped[V(HCAO_graph)$name==this_vertex]){
+      level_mapping[this_vertex] = min(level_mapping[immediate_parent]+1,2)
+      # limit the extrapolation of level to 2 based on manual curation
+    }else{
+      level_mapping[this_vertex] = level_mapping[immediate_parent]
+    }
+  }
+  V(HCAO_graph)$n_level = unname(level_mapping)
+  vertices_to_fill = V(HCAO_graph)$name[is.na(V(HCAO_graph)$n_level)]
+  #print(length(vertices_to_fill))
+}
+
+V(HCAO_graph)$level = sapply(V(HCAO_graph)$n_level,function(x){
+  if(is.na(x)) return(NA)
+  return(paste0("L",x))
+})
+
+# Visualize to check again
+ggraph(HCAO_graph,layout = "kk")+
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm'),type = "closed"),color="grey") +
+  geom_node_point(mapping = aes(color=level,shape=is_mapped),size=3) +
+  #geom_node_text(mapping=aes(label=label,color=level),nudge_y = 0.1)+
+  scale_color_manual(values = immune_level_color)+
+  scale_shape_manual(values = mapped_shape)+
+  scale_x_continuous(expand = c(0.1,0.1))+
+  theme_void()
+
+```
+
+We save the final HCAO graph for use in cellNexus pipeline.
+
+```{r}
+HCAO_vertices= igraph::as_data_frame(HCAO_graph,what="vertices")
+HCAO_edges= igraph::as_data_frame(HCAO_graph,what="edges")
+
+write.table(HCAO_edges,file = "HCAO_immune_graph_edges.csv",
+            quote = TRUE,sep = ",",row.names = FALSE,col.names = TRUE)
+write.table(HCAO_vertices[,c("name","is_mapped","mapped_by","label","level")],
+            file = "HCAO_immune_graph_vertices.csv",
+            quote = TRUE,sep = ",",row.names = FALSE,col.names = TRUE)
+```
+
