@@ -40,10 +40,6 @@ abstract: |
 ---
 
 ```{r}
-knitr::opts_knit$set(root.dir = '../../')
-```
-
-```{r}
 library(tidyverse)
 library(duckdb)
 library(arrow)
@@ -197,10 +193,11 @@ colmap_ct = c(
 # Load data
 
 ```{r}
-output_parquet = "/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/cell_annotation.parquet"
+# Downaload from Zenodo (https://zenodo.org/records/19909778)
+output_parquet = "cell_annotation.parquet"
 
 # load non immune harmonisation
-non_immune = read.csv("/Users/a1231556/Library/CloudStorage/Box-Box/FileShare/Mangiola_ImmuneAtlas/reannotation_consensus/cell_type_harmonisation_non_immune.csv")
+non_immune = read.csv("cell_type_harmonisation_non_immune.csv")
 
 # Read back
 con <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
@@ -212,13 +209,13 @@ data_consensus
 
 ```{r}
 # load knowledge graph
-adj_immune = read.csv("./data/graphs/immune_tree.csv", row.names = 1, check.names = FALSE) |> 
+adj_immune = read.csv("graphs/immune_tree.csv", row.names = 1, check.names = FALSE) |> 
   as.matrix()
 cell_order = setdiff(rownames(adj_immune), "non immune")
 ig_immune = graph_from_adjacency_matrix(adj_immune, mode = "directed")
 
 # load mappings between predictions and our dictionary
-map_files = list.files("./data/graphs", pattern = "immune_map", full.names = TRUE)
+map_files = list.files("graphs", pattern = "immune_map", full.names = TRUE)
 names(map_files) = gsub("immune_map_(.+).csv", "\\1", basename(map_files))
 tbl_maps = map_files |> 
   lapply(read.csv)
@@ -386,7 +383,7 @@ data_consensus |>
 ```
 
 ```{r}
-immune_adj = read.csv("./data/graphs/immune_tree.csv", check.names = FALSE, row.names = 1)
+immune_adj = read.csv("graphs/immune_tree.csv", check.names = FALSE, row.names = 1)
 cell_order = setdiff(colnames(immune_adj), "non immune")
 
 # read immune tree
@@ -536,7 +533,7 @@ Here we break the links from cytotoxic cells to other cytotoxic cell types such 
 
 ```{r fig.height=9, fig.width=10}
 # build graph
-immune_adj = read.csv("./data/graphs/immune_tree.csv", check.names = FALSE, row.names = 1) |> 
+immune_adj = read.csv("graphs/immune_tree.csv", check.names = FALSE, row.names = 1) |> 
   as.matrix()
 immune_adj["cytotoxic", ] = 0
 immune_adj["monocytic", "macrophage"] = 0
@@ -628,7 +625,7 @@ level_map = (map_level(alltypes, immune_ig, 0) |> rownames_to_column("cell_type_
   left_join((map_level(alltypes, immune_ig, 1) |> rownames_to_column("cell_type_unified_harmonised"))) |> 
   left_join((map_level(alltypes, immune_ig, 2) |> rownames_to_column("cell_type_unified_harmonised"))) |> 
   left_join((map_level(alltypes, immune_ig, 3) |> rownames_to_column("cell_type_unified_harmonised")))
-write.csv(level_map, "./data/caq_celltype_level_map.csv", row.names = FALSE)
+write.csv(level_map, "caq_celltype_level_map.csv", row.names = FALSE)
 ```
 
 # Resolving missing values at deeper annotation levels
