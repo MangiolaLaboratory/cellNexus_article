@@ -36,37 +36,47 @@ and unzipped into this folder as the input file for workflows.
 
 ## Install R packages
 
-```r
-install.packages(c(
-  "tidyverse", "tidybulk", "Seurat", "caret", "ggpubr", "yardstick",
-  "nnet", "ggalluvial", "ggsci", "patchwork", "igraph", "scico",
-  "cowplot", "magick", "ggplotify", "ggrepel", "pheatmap", "scales",
-  "uwot", "formatR"
-))
+The following packages can be installed from CRAN:
 
+```r
+
+install.packages(c(
+  "tidyverse", "duckdb", "arrow", "patchwork","igraph", "DT","tidyHeatmap",
+  "tidygraph","ggraph","scico","ggalluvial","ggrepel","tidybulk","igraph","rdflib"
+))
+```
+
+The following packages can be installed from Bioconductor:
+
+```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
 }
 
 BiocManager::install(c(
-  "SummarizedExperiment", "SingleCellExperiment", "edgeR",
-  "DelayedMatrixStats", "HDF5Array", "scater", "standR", "bluster",
-  "BiocNeighbors", "zellkonverter", "org.Hs.eg.db",
-  "ComplexHeatmap", "circlize", "cellNexus"
+  "BiocParallel", "ComplexHeatmap",
+  "SummarizedExperiment", "SingleCellExperiment","scuttle",
+  "edgeR", "limma", "variancePartition"
+  "org.Hs.eg.db", "cellNexus","vissE"
 ))
+```
 
+The following package can be installed from GitHub:
+
+```r
+devtools::install_github("stemangiola/CuratedAtlasQueryR")
 ```
 
 ## Run order
 
-1. Render `cell_typing_method.qmd` to create report and:
-  - TBA
+1. Render `cell_typing_method.qmd` to create report.
 
 2. Render `cell_typing_results.qmd` to create report and:
-  - TBA
-
+  - `caq_celltype_level_map.csv`
+  - `cell_annotation_new.parquet`
+  
 3. Render `B_memory_case_study.qmd` to create report.
 
 4. Render `HCAO_tree.qmd` to create report and:
-  - HCAO_immune_graph_vertices.csv
-  - HCAO_immune_graph_edges.csv
+  - `HCAO_immune_graph_vertices.csv`
+  - `HCAO_immune_graph_edges.csv`
