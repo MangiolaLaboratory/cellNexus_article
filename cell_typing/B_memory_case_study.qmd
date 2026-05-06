@@ -121,7 +121,7 @@ immune_level_color = c(
   L3 = "#F9CCF9"
 )
 
-celltype_level = c("b memory"="L2","b naive"="L2","plasma"="L2","b"="L1","Other"="L1")
+celltype_level = c("b memory"="L1","b naive"="L1","plasma"="L1","b"="L0","Other"="L0")
 celltype_color = immune_level_color[celltype_level]
 names(celltype_color) = names(celltype_level)
 
