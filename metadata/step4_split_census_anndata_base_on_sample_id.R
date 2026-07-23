@@ -1,3 +1,9 @@
+# This script splits the per-dataset AnnData (h5ad) files downloaded in step 1
+# into per-sample h5ad files, using the observation join IDs recorded in the
+# Census metadata parquet to assign each cell to its originating sample. The
+# splitting is parallelised across up to SLURM workers via {targets} and
+# {crew.cluster}
+
 library(targets)
 library(zellkonverter)
 library(tibble)

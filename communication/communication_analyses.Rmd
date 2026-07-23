@@ -719,7 +719,7 @@ job::job({
       # selects a reference sample, and performs normalisation and scaling.
       tar_target(
         cellchat_file,
-        "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cellNexus_lr_signaling_pathway_strength.duckdb",
+        "cellNexus_lr_signaling_pathway_strength.duckdb",
         format = "file"
       ),
       tar_target(
@@ -1013,13 +1013,13 @@ job::job({
     
   },
   ask = FALSE, 
-  script = "/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets.R"
+  script = "cellchat_brms_1_6_12_d/_targets.R"
   )
   
   tar_make(
     # callr_function = NULL,
-    script = "/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets.R", 
-    store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets", 
+    script = "cellchat_brms_1_6_12_d/_targets.R", 
+    store ="cellchat_brms_1_6_12_d/_targets", 
     reporter = "verbose" # "balanced"
   )
   
@@ -1033,30 +1033,30 @@ library(targets)
 library(tidyverse)
 library(duckdb)
 
-tar_poll(store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets")
+tar_poll(store ="cellchat_brms_1_6_12_d/_targets")
 
 
 tar_workspace(
   "estimates_chunk_04da6012b937653b",
-  script = "/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets.R", 
-  store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets"
+  script = "cellchat_brms_1_6_12_d/_targets.R", 
+  store ="cellchat_brms_1_6_12_d/_targets"
 )
 
 tar_read_raw(
   "estimates_chunk_633f6596569029e6",
-  store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets", 
+  store ="cellchat_brms_1_6_12_d/_targets", 
   branches = 1
 )
 
 tar_read(
   cell_pathway_combination,
-  store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets", 
+  store ="cellchat_brms_1_6_12_d/_targets", 
   branches = 1
 )
 
 tar_read_raw(
   "estimates_chunk_80604f0079ad66c0",
-  store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets", 
+  store ="cellchat_brms_1_6_12_d/_targets", 
   branches = 1
 )
 
@@ -1071,14 +1071,14 @@ job::job({
   # meta = 
   #   tar_meta(
   #     starts_with("hypothesis_age_monotonic_"), 
-  #     store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets"
+  #     store ="cellchat_brms_1_6_12_d/_targets"
   #   ) |> 
   #   filter(!data |> is.na())
   
   data_for_plot = tar_read(
     hypothesis_age_monotonic,
     #meta = meta,
-    store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets"
+    store ="cellchat_brms_1_6_12_d/_targets"
   ) |> 
     rowid_to_column() |> 
     filter(!map_lgl(hypothesis_age_monotonic, is.null, .progress = TRUE)) |>
@@ -1097,7 +1097,7 @@ job::job({
         dbConnect(dbdir =
                     tar_read(
                       cellchat_file,
-                      store ="/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_c/_targets"
+                      store ="cellchat_brms_1_6_12_c/_targets"
                     ),
                   read_only = TRUE
         )    |>
@@ -2040,7 +2040,7 @@ focal_pathway  <- "LIFR"
 # Locate branch and read estimates_chunk for a given combination ----------
 ```{r read pathway from pipeline, eval=FALSE}
 set.seed(42)
-store_path <- "/vast/scratch/users/mangiola.s/cellchat_brms_1_6_12_d/_targets"
+store_path <- "cellchat_brms_1_6_12_d/_targets"
 
 # find which branch of cell_pathway_combination contains it
 cell_pathway_combination = 
@@ -2243,7 +2243,7 @@ macro_muscle =
   get_metadata() |>
   filter(cell_type_unified %in% c("macrophage", "muscle"), sample_id %in% sample_list, tissue_groups %in% sig_tissues) |>
   filter(empty_droplet == FALSE, alive == TRUE, scDblFinder.class != "doublet", feature_count>=8000) |> 
-  get_single_cell_experiment(cache_directory = "/vast/projects/cellxgene_curated/cellNexus/")
+  get_single_cell_experiment()
 
 library(HDF5Array)
 library(DelayedArray)

@@ -276,7 +276,7 @@ get_pairs_to_consider = function(all_cell_types) {
         set_names(select(pairs_to_consider, source, target), 
             c("target", "source"))))
 }
-list(tar_target(cellchat_file, "/vast/projects/cellxgene_curated/metadata_cellxgene_mengyuan/cellNexus_lr_signaling_pathway_strength.duckdb", 
+list(tar_target(cellchat_file, "cellNexus_lr_signaling_pathway_strength.duckdb", 
     format = "file"), tar_target(ethnicity_imputed, {
     check_rclone_installation()
     temp_path = tempdir()

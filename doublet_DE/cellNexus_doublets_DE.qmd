@@ -173,7 +173,7 @@ tar_script({
   list(
     tar_target(
       my_cache_directory,
-      "/vast/projects/cellxgene_curated/cellNexus/"
+      tempdir()
     ),
     tar_target(my_doublet_proportion, 0.05),
     tar_target(
@@ -404,19 +404,19 @@ tar_script({
 }, ask = FALSE, script = here::here("doublet_DE", "_targets.R"))
 
 tar_make(script = here::here("doublet_DE", "_targets.R"),
-         store = "/vast/scratch/users/mangiola.s/doublet_DE/targets")
+         store = "doublet_DE/targets")
 
 tar_workspace(
   se_dataset,
   script = here::here("doublet_DE", "_targets.R"),
- store = "/vast/scratch/users/mangiola.s/doublet_DE/targets"
+ store = "doublet_DE/targets"
 )
 ```
 
 ```{r}
 
 
-  tar_read(gsea, store = "/vast/scratch/users/mangiola.s/doublet_DE/targets")[[1]] |> 
+  tar_read(gsea, store = "doublet_DE/targets")[[1]] |> 
      unnest(test) |>
         filter(Description |> str_detect("ADH"))
 

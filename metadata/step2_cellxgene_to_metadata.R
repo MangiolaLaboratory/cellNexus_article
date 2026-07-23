@@ -1,3 +1,10 @@
+# This script extracts and harmonises cell- and sample-level metadata from
+# CELLxGENE Census datasets using the {cellxgenedp} API, running as a {targets}
+# pipeline dispatched across SLURM workers. It produces the core metadata
+# parquets consumed by all downstream steps: sample_metadata.parquet,
+# cell_ids_for_metadata.parquet, age_days.parquet, and tissue_grouped.parquet,
+# all written to the metadata_cellxgenedp_Apr_2024/ directory.
+
 .rs.restartR()
 library(tidyverse)
 library(targets)

@@ -1,5 +1,8 @@
-# This scripts test cellNexus API with new data generated in STEP_7_unify_and_update_sce_metadata.R
-# Before running this script, it assumes that files generated in step6-8 are uploaded to Nectar cloud.
+# This script validates the final cellNexus resource by exercising the public
+# R API against both the cloud cache and a local cache. It checks metadata
+# retrieval, quality-cell filtering, all four expression layers (counts, cpm,
+# rank, sct), pseudobulk access, and QC-flag distributions. It should be run
+# after the outputs of steps 7–9 have been uploaded to the Nectar cloud store.
 library(dplyr)
 library(cellNexus)
 library(stringr)
