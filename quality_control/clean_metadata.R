@@ -7,10 +7,22 @@ source("plot_custom_theme.R")
 source("CAQ_age_analysis_functions.R")
 
 # Manipulate metadata
-cell_metadata <- get_metadata() |>
-  join_census_table() |>
+cell_metadata = get_metadata()
+census_metadata <- cellNexus:::get_census_metadata("2024-07-01")
+con <- dbplyr::remote_con(cell_metadata)
+duckdb::duckdb_register_arrow(con, "census_metadata", census_metadata)
+cell_metadata <- cell_metadata |>
+  dplyr::left_join(tbl(con, "census_metadata")) |>
   # This dataset is removed due to high rates of low quality cells
   filter(assay != "ScaleBio single cell RNA sequencing")
+
+nfeatures_df <- cellNexus:::get_cellxgene_metadata("dataset") |>
+  dplyr::select(dplyr::where(~ !is.list(.x)))
+
+cell_metadata <- cell_metadata |>
+  dplyr::left_join(nfeatures_df,
+                   by = "dataset_id",
+                   copy = TRUE) 
 
 age_groups_tbl <- cell_metadata |>
   distinct(sample_id, age_days, sex) |>

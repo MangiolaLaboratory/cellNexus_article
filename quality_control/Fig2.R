@@ -1,4 +1,3 @@
-# Standard: 183mm width x max 230mm height
 library(dplyr)
 library(purrr)
 library(targets)
@@ -32,11 +31,11 @@ source("2C_scatterplot_cell_sample_count_of_dataset.R")
 ### Panel D: Sample library size density
 source("2D_lib_size_density.R")
 
-# # save alluvial plot separately
-# tissue_disease_alluvial |> ggsave(
-#   filename = "./tissue_disease_alluvial.pdf",
-#   width = 60 * 1.5, height = 100 * 1.5, units = "mm"
-# )
+# save alluvial plot separately
+tissue_disease_alluvial |> ggsave(
+   filename = "./tissue_disease_alluvial.pdf",
+   width = 60 * 1.5, height = 100 * 1.5, units = "mm"
+)
 
 # tissue_assay_alluvial |> ggsave(
 #   filename = "./tissue_assay_alluvial.pdf",
@@ -55,10 +54,6 @@ plot_left <- alluvial / plot_spacer() / left_bottom +
 
 
 plot_right <- age_sex_ethnicity_tissue_bar
-# + plot_layout(guides = 'auto')
-# &
-#   theme(legend.position = "bottom")
-
 
 # Plotting
 first_plot <-
@@ -76,11 +71,11 @@ first_plot <-
     )
 
 
-# ggsave(
-#   plot = first_plot,
-#   filename = "Figure2_dataset_content.pdf",
-#   width = 183,
-#   height = 230,
-#   units = "mm",
-#   dpi = 600
-# )
+ggsave(
+  plot = first_plot,
+  filename = "Figure2_dataset_content.pdf",
+  width = 183,
+  height = 230,
+  units = "mm",
+  dpi = 600
+)

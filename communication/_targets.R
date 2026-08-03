@@ -278,10 +278,7 @@ get_pairs_to_consider = function(all_cell_types) {
 }
 list(tar_target(cellchat_file, "cellNexus_lr_signaling_pathway_strength.duckdb", 
     format = "file"), tar_target(ethnicity_imputed, {
-    check_rclone_installation()
-    temp_path = tempdir()
-    system(glue("~/bin/rclone copy box_adelaide:/Mangiola_ImmuneAtlas/reports/ning/data/All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv {temp_path}/"))
-    mutate(select(read_csv(glue("{temp_path}/All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv")), 
+    mutate(select(read_csv("All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv"), 
         sample_id, ethnicity_groups, ethnicity_groups_imputed = finalEthnicity_groups), 
         ethnicity_groups_imputed = str_replace(ethnicity_groups_imputed, 
             "_imp$", "_imputed"))

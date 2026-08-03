@@ -99,51 +99,85 @@ p1 + p2
 
 ### Figure 3C: Cell quality percentage by tech
 cell_quality_cols <- c(
-  "Dead" = "#C32626",
-  "Doublet" = "#E1B529",
-  "Empty Droplet" = "#0D6EAE"
+  "Empty Droplet" = "#4C72B0",
+  "Dead"     = "#DD8452",
+  "Doublet"       = "#55A868"
 )
 
 # Combine bad quality cells percentagte by tech
-qc_per_assay_metadata <- cell_metadata |>
-  # ScaleBio has lots of Doublet
-  filter(assay_shorten != "ScaleBio") |>
-  group_by(assay_shorten) |>
+per_sample_rescaled <- cell_metadata |>
+  group_by(sample_id, assay_shorten) |>
   summarise(
-    total_cells = n(),
-    empty_cells = sum(ifelse(empty_droplet == "TRUE", 1, 0)),
-    alive_cells = sum(ifelse(alive == TRUE, 1, 0)),
-    dead_cells = sum(ifelse(empty_droplet == "FALSE" & alive |> is.na(), 1, 0)), # To calculate the true value, need to exclude empty droplet cells first
-    doublet = sum(ifelse(empty_droplet == "FALSE" & scDblFinder.class == "doublet", 1, 0)) # To calculate the true value, need to exclude empty droplet cells first
+    total_n   = n(),
+    empty_n   = sum(empty_droplet, na.rm = TRUE),
+    dead_n    = sum(!empty_droplet & !alive, na.rm = TRUE),
+    doublet_n = sum(!empty_droplet & scDblFinder.class == "doublet", na.rm = TRUE),
+    .groups = "drop"
   ) |>
   mutate(
-    `Empty Droplet` = round(empty_cells / total_cells * 100, 2),
-    `Alive Cells` = round(alive_cells / total_cells * 100, 2),
-    `Dead` = round(dead_cells / total_cells * 100, 2),
-    `Doublet` = round(doublet / total_cells * 100, 2)
-  ) |>
-  collect() |>
-  # mutate(assay_shorten = stringr::str_wrap(assay_shorten, width = 10)) |>
-  tidyr::pivot_longer(
-    cols = c("Empty Droplet", "Alive Cells", "Dead", "Doublet"),
-    names_to = "Group", values_to = "Percentage"
+    non_empty_n  = total_n - empty_n,
+    frac_empty   = empty_n / total_n,
+    frac_dead    = dead_n / total_n,
+    frac_doublet = doublet_n / total_n
   )
 
-qc_plot <- qc_per_assay_metadata |>
-  filter(Group != "Alive Cells") |>
-  ggplot(aes(
-    x = reorder(assay_shorten, -Percentage),
-    y = Percentage,
-    fill = Group
-  )) +
-  geom_bar(position = "stack", stat = "identity") +
-  theme_multipanel +
-  scale_fill_manual(values = cell_quality_cols) +
-  xlab("Technology") +
-  ylab("Cell Percentage") +
-  theme(axis.text.x = element_text(size = 5, angle = 30, hjust = 1))
+tech_summary <- per_sample_rescaled |>
+  group_by(assay_shorten) |>
+  summarise(
+    mean_frac_empty   = mean(frac_empty),
+    mean_frac_dead    = mean(frac_dead),
+    mean_frac_doublet = mean(frac_doublet),
+    n_samples         = n(),
+    .groups = "drop"
+  ) |>
+  mutate(
+    mean_frac_good = 1 - mean_frac_empty - mean_frac_dead - mean_frac_doublet
+  ) |>
+  collect()
 
-qc_plot
+tech_long <- tech_summary |>
+  select(assay_shorten, mean_frac_good, mean_frac_doublet, mean_frac_dead, mean_frac_empty) |>
+  pivot_longer(-assay_shorten, names_to = "category", values_to = "frac") |>
+  mutate(
+    pct = frac * 100,
+    category = recode(category,
+                      mean_frac_good    = "Alive singlet",
+                      mean_frac_doublet = "Doublet",
+                      mean_frac_dead    = "Dead cell",
+                      mean_frac_empty   = "Empty droplet"
+    ),
+    category = factor(category, levels = c("Alive singlet", "Doublet", "Dead cell", "Empty droplet"))
+  )
+
+assay_order <- tech_long |>
+  filter(category == "Alive singlet") |>
+  arrange(pct) |>
+  pull(assay_shorten)
+
+tech_long <- tech_long |>
+  mutate(assay_shorten = factor(assay_shorten, levels = assay_order)) |>
+  filter(category != "Alive singlet")
+
+ggplot(tech_long, aes(x = assay_shorten, y = pct, fill = category)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(values = c(
+    "Doublet"       = "#F2C14E",
+    "Dead cell"     = "#F26B5B",
+    "Empty droplet" = "#495867"
+  )) +
+  labs(
+    #title = "True composition of all droplets, by assay",
+    #subtitle = "Per-sample rescaled fractions averaged across samples",
+    x = NULL, y = "Mean percentage of all droplets across samples", fill = NULL
+  ) +
+  theme_multipanel +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "top"
+  )
+
+ggsave(here("quality_control", "Figure3C.pdf"), width = 120, height = 70, plot = last_plot(), units = "mm")
+
 
 # Figure 3D: Doublet percentage plot
 source("clean_metadata.R")

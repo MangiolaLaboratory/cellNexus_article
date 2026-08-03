@@ -301,7 +301,7 @@ source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100
       ) |> 
         enframe(name ="tissue_groups") |> 
         distinct() |> 
-        unnest(value) |> 
+        tidyr::unnest(value) |> 
         rename(tissue = value) 
       
       ethnicity_grouped <- tribble(
@@ -499,7 +499,7 @@ source("https://gist.githubusercontent.com/stemangiola/fc67b08101df7d550683a5100
       )
       
       temp_path = tempdir()
-      system(glue("~/bin/rclone copy box_adelaide:/minh_immune_map_disease/disease_data_grouped_further.csv {temp_path}/"))
+      file.copy(here("disease_data_grouped_further.csv"), temp_path)
       
       disease_data_grouped = 
         disease_data_grouped |> 
@@ -569,8 +569,18 @@ Join the project-specific tissue labels and keep only records with a defined `ti
 
 ```{r}
 #| label: load_metadata
-my_metadata =
-    get_metadata() |>
+my_metadata = get_metadata()
+census_metadata <- cellNexus:::get_census_metadata("2024-07-01")
+con <- dbplyr::remote_con(my_metadata)
+duckdb::duckdb_register_arrow(con, "census_metadata", census_metadata)
+my_metadata <- my_metadata |>
+  dplyr::left_join(tbl(con, "census_metadata"))
+nfeatures_df <- cellNexus:::get_cellxgene_metadata("dataset") |>
+  dplyr::select(dplyr::where(~ !is.list(.x)))
+my_metadata <- my_metadata |>
+  dplyr::left_join(nfeatures_df,
+                   by = "dataset_id",
+                   copy = TRUE) |>
     edit_covariates() |> 
     left_join(readr::read_csv(here("tissue_groups_to_labels.csv")), copy = TRUE) |>
     filter(!is.na(tissue_label))
@@ -597,7 +607,7 @@ dead_proportion =
     filter(!empty_droplet) |> 
     count(alive, tissue_label, sample_id, dataset_id) |> 
     pivot_wider(names_from = alive, values_from = n) |> 
-    rename(`FALSE` = `NA`) |> 
+    #rename(`FALSE` = `NA`) |> 
     mutate(`FALSE` = if_else(is.na(`FALSE`), 0, `FALSE`), `TRUE` = if_else(is.na(`TRUE`), 0, `TRUE`)) |> 
     mutate(dead_proportion = `FALSE`/(`TRUE` + `FALSE`)) |> 
     summarise(mean_dead_proportion = mean(dead_proportion, na.rm = TRUE), .by=tissue_label) |>
@@ -779,7 +789,7 @@ qc_table_long =
 # add ordering column based on donor count
 nest(data = -tissue_label)  |>
 mutate(ordering = map_dbl(data, ~ .x |> filter(metric == "donor_count") |> pull(value) |> mean())) |>
-unnest(data) |>
+tidyr::unnest(data) |>
     left_join(readr::read_csv(here("tissue_labels_to_macrocategories.csv")), copy = TRUE) |>
     mutate(macrocategory = if_else(is.na(macrocategory), "Other", macrocategory)) |>
 
@@ -848,7 +858,7 @@ plot_n =
 # Compose
 library(patchwork)
 plot_barplots + plot_n + plot_annotation(tag_levels = 'A') + 
-plot_layout(guides = 'collect', nrow = 1, widths = c(8, 1.5)) &
+plot_layout(guides = 'collect', nrow = 1, widths = c(10, 1.5)) &
   theme(plot.margin = margin(0, 0, 0, 0, "pt"), legend.position = "bottom")
 ```
 

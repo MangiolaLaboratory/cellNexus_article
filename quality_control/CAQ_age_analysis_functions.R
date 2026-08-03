@@ -541,17 +541,17 @@ edit_covariates_from_stefano <- function(tbl) {
     "pilocytic astrocytoma", "Other Diseases"
   )
 
-  temp_path <- tempdir()
-  #system(glue("~/bin/rclone copy box_adelaide:/minh_immune_map_disease/disease_data_grouped_further.csv {temp_path}/"))
-
-  disease_data_grouped <-
-    disease_data_grouped |>
-    left_join(
-      read_csv(glue("{temp_path}/disease_data_grouped_further.csv")) |>
-        rename(disease_groups_further = disease_groups)
-    ) |>
-    mutate(disease_groups = if_else(!disease_groups_further |> is.na(), disease_groups_further, disease_groups)) |>
-    select(disease, disease_groups)
+  temp_path = tempdir()
+  file.copy(here("disease_data_grouped_further.csv"), temp_path)
+      
+  disease_data_grouped = 
+      disease_data_grouped |> 
+        left_join(
+          read_csv(glue("{temp_path}/disease_data_grouped_further.csv")) |> 
+            rename(disease_groups_further = disease_groups)
+        ) |> 
+        mutate(disease_groups = if_else(!disease_groups_further |> is.na(), disease_groups_further, disease_groups)) |> 
+        select(disease,  disease_groups)
 
   tbl |>
     # TISSUE

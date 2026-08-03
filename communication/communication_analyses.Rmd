@@ -725,11 +725,7 @@ job::job({
       tar_target(
         ethnicity_imputed,
         {
-          check_rclone_installation()
-          temp_path = tempdir()
-          system(glue("~/bin/rclone copy box_adelaide:/Mangiola_ImmuneAtlas/reports/ning/data/All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv {temp_path}/"))
-          
-          read_csv(glue("{temp_path}/All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv")) |> 
+          read_csv("All_pseudobulk_1_0_6_ethnicity_imputed_colData.csv") |> 
             select(sample_id, ethnicity_groups, ethnicity_groups_imputed = finalEthnicity_groups) |> 
             mutate(ethnicity_groups_imputed = ethnicity_groups_imputed |> str_replace("_imp$", "_imputed"))
           
