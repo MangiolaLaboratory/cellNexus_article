@@ -102,7 +102,7 @@ Fixed processed inputs for the recommended entry point are available from [Zenod
 
 | File | Description |
 |------|-------------|
-| `Ethnicity_CellNexus.qmd` | Main R/Quarto analysis: loads the processed pseudobulk object, harmonises ethnicity labels, defines high-confidence reference and query sets, exports `.h5ad` files for the Python benchmarking step, runs Seurat `LabelTransfer`, and generates all manuscript figures. |
+| `Ethnicity_CellNexus.qmd` | Main R/Quarto analysis: loads the processed pseudobulk object, harmonises ethnicity labels, defines high-confidence reference and query sets, exports `.h5ad` files for the Python benchmarking step, and generates Figure 4 A,B and C, Supplementary Figures S3, S8, S9, S10 and S11. |
 | `Classifier_benchmark.ipynb` | Python notebook that benchmarks multiple classifiers under dataset-held-out and tissue-held-out cross-validation and generates final query-label predictions. |
 | `etnicity_pipeline_targets.R` | Optional upstream preprocessing pipeline: regenerates the processed pseudobulk object from source using a **{targets}** pipeline. Requires a SLURM-based HPC cluster (job scheduling via `crew.cluster`). |
 | `utils.R` | Helper functions used by `Ethnicity_CellNexus.qmd`. |
