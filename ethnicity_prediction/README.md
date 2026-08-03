@@ -1,6 +1,7 @@
 # Ethnicity prediction
 
 This directory contains the CellNexus workflow for ethnicity-label harmonisation, classifier benchmarking, and final query-label prediction.
+The code here was used to generate Figure 4 A,B and C, Supplementary Figures S3, S8, S9, S10 and S11 in the manuscript.
 
 ## Files
 
