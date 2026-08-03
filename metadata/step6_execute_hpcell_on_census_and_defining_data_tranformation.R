@@ -3,7 +3,7 @@
 # for each sample (raw counts, CPM, or SCTransform) based on a decision tree
 # applied to the count-distribution metrics computed in step 5 supplementary.
 # The pipeline is orchestrated with {targets} and dispatched across a tiered
-# hierarchy of SLURM workers. It requires HPC infrastructure and is not intended to be run locally.
+# hierarchy of SLURM workers. It requires a SLURM-based HPC cluster and cannot be run on a local machine.
 
 library(dplyr)
 library(tibble)

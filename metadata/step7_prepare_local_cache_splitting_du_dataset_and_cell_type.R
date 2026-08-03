@@ -13,8 +13,7 @@
 # raw counts, CPM, per-gene rank, and SCTransform — to the cache directory.
 # (4) Missing-cell verification: cells present in the metadata but absent from
 # the written cache are identified and filtered out of the final metadata
-# parquet. The pipeline requires HPC infrastructure and is not intended to be
-# run locally.
+# parquet. The pipeline requires a SLURM-based HPC cluster.
 
 
 library(arrow)

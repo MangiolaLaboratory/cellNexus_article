@@ -3,7 +3,7 @@
 # min/median ratio, positive mode) to determine the correct count
 # transformation for each sample. The pipeline is orchestrated with
 # {targets} and dispatched across SLURM workers via {crew.cluster}; it
-# requires HPC infrastructure and is not intended to be run locally.
+# requires a SLURM-based HPC cluster.
 
 library(dplyr)
 library(tibble)
