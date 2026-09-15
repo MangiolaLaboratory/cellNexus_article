@@ -1,21 +1,30 @@
-# This script examines per-sample raw count matrices and 
-# computes a set of diagnostic metrics (value range, integrality,
-# min/median ratio, positive mode) to determine the correct count
-# transformation for each sample. The pipeline is orchestrated with
+# This script examines per-sample raw count matrices and computes diagnostic
+# metrics (value range, integrality, min/mean ratio, positive mode) used to
+# infer the correct count transformation for each sample. Per-sample metrics
+# are joined with study metadata and written to a summary parquet file.
+# Samples are then classified via HPCell::impute_x_approximate_distribution,
+# and per-dataset count-distribution histograms are produced as PDFs for
+# visual inspection of each decision. The pipeline is orchestrated with
 # {targets} and dispatched across SLURM workers via {crew.cluster}; it
 # requires a SLURM-based HPC cluster.
 
 library(dplyr)
 library(tibble)
 library(glue)
+library(arrow)
+library(purrr)
 library(targets)
 library(SummarizedExperiment)
 library(zellkonverter)
 library(crew)
 library(crew.cluster)
-library(duckdb)
+library(HPCell)
 
-summary_store = "calculate_census_raw_counts_target_store"
+summary_store          <- "calculate_census_raw_counts_target_store"
+metadata_parquet       <- "metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet"
+sample_summary_parquet <- glue("{summary_store}/sample_distribution_summary.parquet")
+plot_dir               <- glue("{summary_store}/plots")
+n_samples_per_dataset  <- 3
 
 tar_script({
   library(dplyr)
@@ -23,8 +32,16 @@ tar_script({
   library(zellkonverter)
   library(crew)
   library(crew.cluster)
-  library(duckdb)
-  
+  library(arrow)
+  library(purrr)
+  library(targets)
+  library(HPCell)
+
+  metadata_parquet       <- "metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet"
+  sample_summary_parquet <- "calculate_census_raw_counts_target_store/sample_distribution_summary.parquet"
+  plot_dir               <- "calculate_census_raw_counts_target_store/plots"
+  n_samples_per_dataset  <- 3
+
   # Helper to avoid repetition
   new_elastic <- function(name, mem_gb, time_min, workers, crashes_max, cpus_per_task = 2, backup = NULL) {
     crew_controller_slurm(
@@ -40,20 +57,20 @@ tar_script({
       backup = backup
     )
   }
-  
-  elastic_300      <- new_elastic("elastic_300",      300, 60 * 24, workers = 8,   crashes_max = 2)
-  elastic_160      <- new_elastic("elastic_160",      160, 60 * 24, workers = 8,   crashes_max = 2, backup = elastic_300)
-  elastic_120      <- new_elastic("elastic_120",      120, 60 * 4,  workers = 16,  crashes_max = 1, cpus_per_task = 1, backup = elastic_160)
-  elastic_80       <- new_elastic("elastic_80",        80, 60 * 4,  workers = 24,  crashes_max = 1, cpus_per_task = 1, backup = elastic_120)
-  elastic_40       <- new_elastic("elastic_40",        40, 60 * 4,  workers = 32,  crashes_max = 1, cpus_per_task = 1, backup = elastic_80)
-  elastic_20       <- new_elastic("elastic_20",        20, 60 * 4,  workers = 48,  crashes_max = 1, cpus_per_task = 1, backup = elastic_40)
-  elastic_10       <- new_elastic("elastic_10",        10, 60 * 4,  workers = 150, crashes_max = 2, cpus_per_task = 1, backup = elastic_20)
-  elastic_5_minimal <- new_elastic("elastic_5_minimal", 5, 60 * 4,  workers = 300, crashes_max = 2, cpus_per_task = 1, backup = elastic_10)
-  
+
+  elastic_300       <- new_elastic("elastic_300",       300, 60 * 24, workers = 8,   crashes_max = 2)
+  elastic_160       <- new_elastic("elastic_160",       160, 60 * 24, workers = 8,   crashes_max = 2, backup = elastic_300)
+  elastic_120       <- new_elastic("elastic_120",       120, 60 * 4,  workers = 16,  crashes_max = 1, cpus_per_task = 1, backup = elastic_160)
+  elastic_80        <- new_elastic("elastic_80",         80, 60 * 4,  workers = 24,  crashes_max = 1, cpus_per_task = 1, backup = elastic_120)
+  elastic_40        <- new_elastic("elastic_40",         40, 60 * 4,  workers = 32,  crashes_max = 1, cpus_per_task = 1, backup = elastic_80)
+  elastic_20        <- new_elastic("elastic_20",         20, 60 * 4,  workers = 48,  crashes_max = 1, cpus_per_task = 1, backup = elastic_40)
+  elastic_10        <- new_elastic("elastic_10",         10, 60 * 4,  workers = 150, crashes_max = 2, cpus_per_task = 1, backup = elastic_20)
+  elastic_5_minimal <- new_elastic("elastic_5_minimal",  5, 60 * 4,  workers = 300, crashes_max = 2, cpus_per_task = 1, backup = elastic_10)
+
   controllers <- crew_controller_group(
     elastic_10, elastic_20, elastic_40, elastic_80, elastic_120, elastic_160, elastic_300, elastic_5_minimal
   )
-  
+
   tar_option_set(
     memory             = "transient",
     garbage_collection = 100,
@@ -83,16 +100,76 @@ tar_script({
   }
   
   get_positive_mode <- function(x) {
-    sort(table(x[x > 0]), decreasing = TRUE)[1] |> names() |> as.numeric()
+    pos_x <- x[x > 0]
+    pos_x <- pos_x[!is.na(pos_x)]
+
+    if (length(pos_x) == 0) return(NA_real_)
+
+    sort(table(pos_x), decreasing = TRUE)[1] |> names() |> as.numeric()
   }
-  
+
+  # ── plotting helpers ────────────────────────────────────────────────────────
+
+  select_samples_for_distribution_hist <- function(df, n_per_dataset = 3) {
+    df |>
+      dplyr::filter(!is.na(inferred_distribution)) |>
+      dplyr::group_by(inferred_distribution, dataset_id) |>
+      dplyr::slice_sample(n = n_per_dataset) |>
+      dplyr::ungroup()
+  }
+
+  plot_raw_counts_hist_pdf <- function(samples_to_plot,
+                                       pdf_file,
+                                       nrow = 1,
+                                       ncol = 3,
+                                       max_cells = 5e3,
+                                       hist_ylim = c(0, 1e5)) {
+    dir.create(dirname(pdf_file), recursive = TRUE, showWarnings = FALSE)
+    ncol <- min(ncol, max(nrow(samples_to_plot), 1L))
+
+    grDevices::pdf(pdf_file, width = 8 * ncol / 3, height = 4)
+    on.exit(grDevices::dev.off(), add = TRUE)
+    graphics::par(mfrow = c(nrow, ncol), mar = c(3, 3, 3.5, 1))
+
+    for (i in seq_len(nrow(samples_to_plot))) {
+      row <- samples_to_plot[i, ]
+      sce <- zellkonverter::readH5AD(file = row$file_name[[1]], reader = "R", use_hdf5 = TRUE)
+      if (ncol(sce) == 0) next
+      if (ncol(sce) > max_cells) sce <- sce[, sample(ncol(sce), max_cells)]
+
+      assay_name <- names(SummarizedExperiment::assays(sce))[1]
+      x <- as.numeric(SummarizedExperiment::assay(sce, assay_name))
+
+      gap_lab  <- if ("counts_gap_min_mean" %in% names(row)) signif(row$counts_gap_min_mean[[1]], 2) else NA
+      mode_lab <- if ("positive_mode"       %in% names(row)) round(row$positive_mode[[1]], 2)       else NA
+
+      hist_args <- list(
+        x      = x,
+        main   = paste(
+          c(row$inferred_distribution[[1]],
+            paste(row$sample_id[[1]], sep = " | "),
+            paste0("gap=", gap_lab, " mode=", mode_lab)),
+          collapse = "\n"
+        ),
+        xlab      = "",
+        breaks    = 100,
+        cex.main  = 0.7
+      )
+      if (!is.null(hist_ylim)) hist_args$ylim <- hist_ylim
+      do.call(graphics::hist, hist_args)
+    }
+
+    graphics::par(mfrow = c(1, 1))
+    invisible(pdf_file)
+  }
+
   # Stage 1 – read SCE and return a minimal list with only what downstream needs.
   # Keeping the raw matrix avoids re-reading the file in the metrics stage, while
   # returning a plain list (not a full SCE) keeps the serialised object small.
   read_sce_counts <- function(file) {
     sce        <- readH5AD(file, reader = "R", use_hdf5 = TRUE)
     if (ncol(sce) == 0) return(NULL)
-    
+
     assay_name <- names(sce@assays)[1]
     counts_mat <- as.matrix(assay(sce, assay_name))
     
@@ -113,36 +190,24 @@ tar_script({
     all_int    <- all(counts_vec == floor(counts_vec), na.rm = TRUE)
     
     tibble::tibble(
-      sample_id          = sce_data$sample_id,
-      min_val            = min(counts_vec,    na.rm = TRUE),
-      median_val         = median(counts_vec, na.rm = TRUE),
-      max_val            = max(counts_vec,    na.rm = TRUE),
-      counts_gap_min_med = pos_min_med_ratio(counts_vec),
-      counts_gap_min_mean= pos_min_mean_ratio(counts_vec),
-      positive_mode      = get_positive_mode(counts_vec),
-      has_negative       = min(counts_vec, na.rm = TRUE) < 0,
-      max_gt_10          = max(counts_vec, na.rm = TRUE) > 10,
-      all_integer        = all_int,
-      has_floating       = !all_int && all(abs(counts_vec - round(counts_vec)) < tol, na.rm = TRUE),
-      n_cells            = sce_data$n_cells,
-      n_genes            = sce_data$n_genes
-    ) |>
-      left_join(
-        tbl(
-          dbConnect(duckdb::duckdb(), dbdir = ":memory:"),
-          sql("SELECT * FROM read_parquet('metadata_cellxgenedp_Apr_2024/census_samples_to_download_groups_MODIFIED.parquet')")
-        ) |>
-          select(-observation_joinid, list_length) |>
-          distinct() |>
-          mutate(sample_id = paste0(sample_2, ".h5ad")) |>
-          collect(),
-        by   = "sample_id",
-        copy = TRUE
-      )
+      sample_id                     = sce_data$sample_id,
+      min_val                       = min(counts_vec,    na.rm = TRUE),
+      median_val                    = median(counts_vec, na.rm = TRUE),
+      max_val                       = max(counts_vec,    na.rm = TRUE),
+      counts_gap_min_med            = pos_min_med_ratio(counts_vec),
+      counts_gap_min_mean           = pos_min_mean_ratio(counts_vec),
+      positive_mode                 = get_positive_mode(counts_vec),
+      has_negative                  = min(counts_vec, na.rm = TRUE) < 0,
+      all_integer                   = all_int,
+      has_rounding_error            = !all_int && all(abs(counts_vec - round(counts_vec)) < tol, na.rm = TRUE),
+      n_cells                       = sce_data$n_cells,
+      n_genes                       = sce_data$n_genes,
+      is_gene_expression_likely_log = max_val < 20
+    )
   }
-  
+
   # ── pipeline ───────────────────────────────────────────────────────────────
-  
+
   list(
     tar_target(
       files,
@@ -173,6 +238,80 @@ tar_script({
       resources = tar_resources(
         crew = tar_resources_crew(controller = "elastic_10")
       )
+    ),
+
+    # Stage 3 – collect per-sample metrics and join with study metadata.
+    # Classification is NOT done here; this is the canonical output written to disk.
+    tar_target(
+      sample_summary_df_joined,
+      {
+        metrics <- sample_summary_df |>
+          purrr::compact() |>
+          dplyr::bind_rows()
+
+        meta <- arrow::read_parquet(metadata_parquet) |>
+          dplyr::select(-observation_joinid, -list_length) |>
+          dplyr::distinct() |>
+          dplyr::mutate(sample_id = paste0(sample_2, ".h5ad"))
+
+        metrics |>
+          dplyr::left_join(meta, by = "sample_id")
+      },
+      resources = tar_resources(
+        crew = tar_resources_crew(controller = "elastic_10")
+      )
+    ),
+
+    tar_target(
+      sample_summary_parquet_file,
+      {
+        arrow::write_parquet(sample_summary_df_joined, sample_summary_parquet)
+        sample_summary_parquet
+      },
+      format = "file",
+      deployment = "main"
+    ),
+
+    # Stage 4 – classify then sample per dataset per decision, one PDF per group.
+    # impute_x_approximate_distribution is called here, only for plotting.
+    tar_target(
+      plot_jobs,
+      {
+        set.seed(12345)
+        sample_summary_df_joined |>
+          HPCell::impute_x_approximate_distribution(
+            counts_gap_threshold = 0.25,
+            pos_mode_threshold = 1
+          ) |>
+          select_samples_for_distribution_hist(n_per_dataset = n_samples_per_dataset) |>
+          dplyr::mutate(
+            file_name = file.path("split_h5ad_based_on_sample_id/2024-07-01", sample_id),
+            pdf_file = file.path(
+              plot_dir,
+              inferred_distribution,
+              paste0(dataset_id, ".pdf")
+            )
+          ) |>
+          dplyr::group_by(inferred_distribution, dataset_id) |>
+          tar_group()
+      },
+      iteration = "group"
+    ),
+
+    tar_target(
+      hist_pdf,
+      plot_raw_counts_hist_pdf(
+        plot_jobs,
+        pdf_file = unique(plot_jobs$pdf_file),
+        nrow = 1,
+        ncol = 3
+      ),
+      pattern = map(plot_jobs),
+      iteration = "list",
+      format = "file",
+      resources = tar_resources(
+        crew = tar_resources_crew(controller = "elastic_10")
+      )
     )
   )
   
@@ -181,7 +320,6 @@ tar_script({
 job::job({
   
   tar_make(
-    # callr_function = NULL,
     reporter = "summary",
     script = glue("{summary_store}/_targets.R"),
     store = glue("{summary_store}/_targets")
