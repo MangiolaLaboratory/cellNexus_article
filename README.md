@@ -9,7 +9,7 @@ This repository contains all analysis code and workflows accompanying the cellNe
 The cellNexus resource aggregates data at scale so that metadata, QC flags, and expression representations are comparable across studies and tissues. This repository documents exactly how those representations were built and evaluated:
 
 - **Metadata pipeline** — how raw CELLxGENE Census data were ingested, quality-controlled, and unified.
-- **Quality control** — tissue-level QC landscapes and density-based diagnostics used in the paper.
+- **Quality control** — quality control landscapes and diagnostics used in the paper.
 - **Cell typing** — the immune-graph consensus mapping methodology and results.
 - **Doublet-aware DE** — differential expression accounting for doublet contamination.
 - **Sex prediction** — a classifier that predicts donor sex from expression data.
@@ -41,23 +41,23 @@ Stepwise R scripts that built the cellNexus resource from scratch: downloading C
 
 ---
 
-### `quality_control/` — Tissue-level QC figures
+### `quality_control/` — Quality-control figures
 
-Scripts and a Quarto report producing the tissue-level QC landscape figures in the paper.
+Scripts and Quarto reports producing the dataset-composition and tissue-level
+quality-control figures in the paper. Figure 2 is documented as a
+self-contained report so that each panel's analytical purpose and data
+transformation can be reviewed alongside its code.
 
 | File | Description |
 |------|-------------|
+| `Fig2.qmd` | Generates Figure 2. Panel A relates donor coverage across technologies, tissues, and disease groups; Panel B summarises donor age, sex, and ethnicity by tissue; Panel C compares donor coverage and alive-cell yield across datasets; and Panel D shows sample library-size distributions by technology. The report assembles and exports the final publication figure. |
 | `tissue_landscape.Qmd` | Generates Figure 3A. Main QC Quarto report: assembles all tissue-level QC landscape figures, including technology-by-tissue bubble plots, cell/sample count scatterplots, library-size density distributions, age distributions, and alluvial composition plots. |
-| `Fig2.R` | Assembles Figure 2 panel from individual QC plot components. |
-| `Fig3.R` | Assembles Figure 3 panel. |
+| `Fig3.qmd` | Generates Figure 3B–D in a documented workflow: count distributions before and after recovery, low-quality cell percentages by technology, and doublet percentages by cell type. |
 | `Supplementary Figure 1.R` | Generates Supplementary Figure 1. |
-| `2A_alluvial_plots.R` | Alluvial plots showing cell-type composition shifts across datasets. |
-| `2B_age_distribution_by_sex_ethnicity_per_tissue.R` | Age distribution broken down by sex and ethnicity for each tissue. |
-| `2C_scatterplot_cell_sample_count_of_dataset.R` | Scatter plot of per-dataset cell and sample counts. |
-| `2D_lib_size_density.R` | Library-size density plots comparing raw and normalised data. |
 | `CAQ_age_analysis_functions.R` | Helper functions for age-stratified CuratedAtlasQuery analyses, shared with `doublet_DE/`. |
 | `clean_metadata.R` | Metadata cleaning utilities; calls `get_metadata()` from the cellNexus package. |
 | `plot_custom_theme.R` | Custom ggplot2 theme applied consistently across all QC figures. |
+| `utils.R` | Helper functions used by `Fig2.qmd` and `Fig3.qmd`. |
 
 ---
 

@@ -1,0 +1,583 @@
+---
+title: "cellNexus paper Figure 2: Dataset composition and donor coverage"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+editor: source
+---
+
+This report generates every panel of Figure 2 and then assembles the
+publication figure. Keeping the data transformations, plots, and panel
+descriptions together makes the analytical purpose of each panel explicit.
+
+## Setup
+
+```{r}
+#| label: setup
+#| include: false
+
+library(cellNexus)
+library(dplyr)
+library(ggalluvial)
+library(ggfittext)
+library(ggplot2)
+library(ggrepel)
+library(ggsci)
+library(ggridges)
+library(patchwork)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(viridis)
+
+source(here("quality_control", "plot_custom_theme.R"))
+source(here("quality_control", "CAQ_age_analysis_functions.R"))
+source(here("quality_control", "utils.R"))
+source(here("quality_control", "clean_metadata.R"))
+
+set.seed(123)
+```
+
+## Panel A: Donor composition across technologies, tissues, and diseases
+
+Panel A uses alluvial diagrams to show how donors from the six most
+represented tissue groups are distributed across sequencing technologies and
+broad disease groups. Disease groups with the three smallest donor counts are
+excluded to keep low-frequency categories from obscuring the dominant
+composition patterns. ScaleBio observations are excluded because that assay
+was removed during metadata quality control.
+
+```{r}
+#| label: fig-panel-a
+#| fig-cap: "Donor flows from technologies to tissues and from tissues to disease groups."
+#| fig-width: 12
+#| fig-height: 8
+
+tissue_cols <- c(
+  "Blood" = "#91AD9E",
+  "Respiratory" = "#979771",
+  "Cerebral Lobes" = "#B0B1B6",
+  "Breast" = "#C2CEDC",
+  "Skin" = "#D4BAAD",
+  "Renal" = "#E1CCB1"
+)
+
+alluvial_metadata <- cell_metadata |>
+  filter(assay_groups != "ScaleBio")
+
+top_tissues_in_donors <- alluvial_metadata |>
+  group_by(tissue_groups_shorten) |>
+  summarise(donor_count = n_distinct(donor_id), .groups = "drop") |>
+  collect() |>
+  arrange(desc(donor_count)) |>
+  slice_head(n = 6) |>
+  pull(tissue_groups_shorten)
+
+diseases_to_exclude <- alluvial_metadata |>
+  filter(!is.na(disease_groups_coarse)) |>
+  group_by(disease_groups_coarse) |>
+  summarise(donor_count = n_distinct(donor_id), .groups = "drop") |>
+  collect() |>
+  arrange(donor_count) |>
+  slice_head(n = 3) |>
+  pull(disease_groups_coarse) 
+
+tissue_disease_pairs <- alluvial_metadata |>
+  filter(
+    tissue_groups_shorten %in% top_tissues_in_donors,
+    !disease_groups_coarse %in% diseases_to_exclude
+  ) |>
+  group_by(disease_groups_coarse, tissue_groups_shorten, assay_groups) |>
+  summarise(donor_count = n_distinct(donor_id), .groups = "drop") |>
+  collect() |>
+  mutate(
+    disease_groups_coarse = str_wrap(disease_groups_coarse, width = 20),
+    tissue_groups_shorten = str_wrap(tissue_groups_shorten, width = 20)
+  )
+
+tissue_order <- tissue_disease_pairs |>
+  summarise(total = sum(donor_count), .by = tissue_groups_shorten) |>
+  arrange(desc(total)) |>
+  pull(tissue_groups_shorten)
+
+technology_order <- tissue_disease_pairs |>
+  summarise(total = sum(donor_count), .by = assay_groups) |>
+  arrange(desc(total)) |>
+  pull(assay_groups)
+
+disease_order <- tissue_disease_pairs |>
+  summarise(total = sum(donor_count), .by = disease_groups_coarse) |>
+  arrange(desc(total)) |>
+  pull(disease_groups_coarse)
+
+tissue_disease_pairs <- tissue_disease_pairs |>
+  mutate(
+    tissue_groups_shorten = factor(tissue_groups_shorten, levels = tissue_order),
+    assay_groups = factor(assay_groups, levels = technology_order),
+    disease_groups_coarse = factor(
+      disease_groups_coarse,
+      levels = disease_order
+    ),
+    tissue_text_size = case_when(
+      tissue_groups_shorten == "Blood" ~ 4,
+      tissue_groups_shorten == "Respiratory" ~ 3,
+      tissue_groups_shorten == "Cerebral Lobes" ~ 2.5,
+      tissue_groups_shorten %in% c("Breast", "Skin") ~ 2,
+      tissue_groups_shorten == "Renal" ~ 1.5
+    ),
+    assay_text_size = case_when(
+      assay_groups %in% c("10x Genomics 3", "10x Genomics 5") ~ 2.5,
+      assay_groups %in% c(
+        "Plate based Technologies",
+        "Other Technologies",
+        "Smart seq"
+      ) ~ 1.5,
+      assay_groups %in% c(
+        "Microwell Technologies",
+        "Drop based Technologies"
+      ) ~ 1
+    ),
+    disease_text_size = case_when(
+      disease_groups_coarse %in% c("Normal", "COVID-19") ~ 3,
+      disease_groups_coarse %in% c(
+        "Glioblastoma",
+        "Lung AdenoCA",
+        "Cancer",
+        "Lupus"
+      ) ~ 2,
+      disease_groups_coarse %in% c(
+        "Respiratory",
+        "Metabolic/Other"
+      ) ~ 1.5,
+      disease_groups_coarse == "Infectious/Immune" ~ 1
+    )
+  ) |>
+  arrange(tissue_groups_shorten)
+
+tissue_size <- tissue_disease_pairs |>
+  distinct(tissue_groups_shorten, tissue_text_size) |>
+  deframe()
+disease_size <- tissue_disease_pairs |>
+  distinct(disease_groups_coarse, disease_text_size) |>
+  deframe()
+assay_size <- tissue_disease_pairs |>
+  distinct(assay_groups, assay_text_size) |>
+  deframe()
+
+tissue_disease_alluvial <- tissue_disease_pairs |>
+  ggplot(aes(
+    axis1 = tissue_groups_shorten,
+    axis2 = disease_groups_coarse,
+    y = donor_count
+  )) +
+  geom_alluvium(
+    aes(fill = tissue_groups_shorten),
+    width = 0.5,
+    show.legend = FALSE
+  ) +
+  geom_stratum(
+    aes(fill = tissue_groups_shorten),
+    width = 0.5,
+    color = "black",
+    na.rm = TRUE,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    stat = "stratum",
+    aes(label = after_stat(stratum), size = after_stat(stratum)),
+    show.legend = FALSE
+  ) +
+  scale_size_manual(values = c(tissue_size, disease_size)) +
+  scale_x_discrete(
+    limits = c("Tissue Groups", "Disease Groups"),
+    expand = c(0.05, 0.05)
+  ) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = tissue_cols, na.value = NA) +
+  coord_cartesian(clip = "off") +
+  labs(x = NULL, y = NULL) +
+  theme_multipanel +
+  theme(
+    legend.position = "none",
+    panel.background = element_rect(fill = "grey95", color = NA)
+  )
+
+tissue_assay_alluvial <- tissue_disease_pairs |>
+  ggplot(aes(
+    axis1 = assay_groups,
+    axis2 = tissue_groups_shorten,
+    y = donor_count
+  )) +
+  geom_alluvium(
+    aes(fill = tissue_groups_shorten),
+    width = 0.5,
+    show.legend = FALSE
+  ) +
+  geom_stratum(
+    aes(fill = tissue_groups_shorten),
+    width = 0.5,
+    color = "black",
+    na.rm = TRUE,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    stat = "stratum",
+    aes(label = after_stat(stratum), size = after_stat(stratum)),
+    show.legend = FALSE
+  ) +
+  scale_size_manual(values = c(tissue_size, assay_size)) +
+  scale_x_discrete(
+    limits = c("Technologies", "Tissue Groups"),
+    expand = c(0.05, 0.05)
+  ) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = tissue_cols, na.value = NA) +
+  coord_cartesian(clip = "off") +
+  labs(x = NULL, y = "Donor Count") +
+  theme_multipanel +
+  theme(
+    legend.position = "none",
+    panel.background = element_rect(fill = "grey95", color = NA)
+  )
+
+tissue_assay_alluvial + tissue_disease_alluvial
+```
+
+## Panel B: Donor demographics by tissue
+
+Panel B summarises donor age, sex, and ethnicity for the 25 tissue groups with
+the greatest donor representation. Female counts are plotted on the negative
+side and male counts on the positive side; the signed log transformation
+allows tissues with very different donor totals to remain visible.
+
+```{r}
+#| label: fig-panel-b
+#| fig-cap: "Signed log donor counts by age, sex, ethnicity, and tissue."
+#| fig-width: 8
+#| fig-height: 16
+
+donor_metadata <- cell_metadata |>
+  filter(sex != "unknown") |>
+  distinct(donor_id, self_reported_ethnicity, age_days, sex, tissue_groups_shorten) |>
+  as_tibble() |>
+  mutate(age_groups = coarse_age_bin(age_days, sex)) |>
+  left_join(ethnicity_grouped)
+
+donor_count_df <- donor_metadata |>
+  count(ethnicity_groups, age_groups, sex, tissue_groups_shorten) |>
+  mutate(
+    age_groups = if_else(is.na(age_groups), "Unknown", age_groups),
+    tissue_groups_shorten = str_replace_all(tissue_groups_shorten, "/", "/\n"),
+    tissue_groups_shorten = str_wrap(tissue_groups_shorten, width = 10)
+  )
+
+tissue_order <- donor_count_df |>
+  summarise(total_n = sum(n), .by = tissue_groups_shorten) |>
+  arrange(desc(total_n)) |>
+  pull(tissue_groups_shorten)
+
+top_tissues <- tissue_order[seq_len(min(25, length(tissue_order)))]
+
+demographic_plot_data <- donor_count_df |>
+  filter(age_groups != "Unknown", tissue_groups_shorten %in% top_tissues) |>
+  mutate(
+    tissue_groups_shorten = factor(tissue_groups_shorten, levels = tissue_order),
+    donor_count = if_else(sex == "female", -n, n),
+    age_groups = factor(age_groups, levels = c(">60", "30-60", "<30")),
+    count_sign = sign(donor_count)
+  )
+
+ethnicity_colors <- setNames(
+  c(pal_npg("nrc")(7), "gray40", "gray"),
+  c(
+    "European",
+    "East Asian",
+    "Japanese",
+    "South Asian",
+    "African",
+    "Hispanic/Latin American",
+    "Native American & Pacific Islander",
+    "LowConfidenceLabel",
+    "Other/Unknown"
+  )
+)
+
+age_sex_ethnicity_tissue_bar <- demographic_plot_data |>
+  ggplot(aes(
+    x = age_groups,
+    y = log(abs(donor_count)) * count_sign,
+    fill = ethnicity_groups
+  )) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_grid(tissue_groups_shorten ~ ., switch = "y") +
+  scale_fill_manual(
+    values = ethnicity_colors,
+    guide = guide_legend(nrow = 4)
+  ) +
+  labs(
+    x = NULL,
+    y = expression(log(abs(donor[count])) %.% Sign),
+    fill = "Ethnicity"
+  ) +
+  theme_multipanel +
+  theme(
+    strip.placement = "outside",
+    strip.text.y.left = element_text(
+      angle = 0,
+      hjust = 1,
+      size = 6,
+      face = "bold"
+    ),
+    strip.background = element_blank(),
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 5),
+    legend.key.height = unit(0.05, "cm"),
+    legend.key.width = unit(0.05, "cm")
+  )
+
+age_sex_ethnicity_tissue_bar
+```
+
+## Panel C: Dataset scale and donor coverage
+
+Panel C compares each dataset's donor count with its mean number of
+quality-controlled (alive) cells per donor. Both axes are log-scaled because
+dataset sizes span orders of magnitude. Selected extremes are labelled to
+provide interpretable reference points, and colour indicates sequencing
+technology.
+
+```{r}
+#| label: fig-panel-c
+#| fig-cap: "Donor count versus mean alive-cell count for each dataset."
+#| fig-width: 8
+#| fig-height: 5
+
+technology_colors <- c(
+  "10x Genomics 3" = "#a6cee3",
+  "Multi-technologies" = "#1f78b4",
+  "10x Genomics 5" = "#b2df8a",
+  "Other Technologies" = "#33a02c",
+  "Smart seq" = "#fb9a99",
+  "Microwell Technologies" = "#e31a1c",
+  "TruDrop" = "#fdbf6f",
+  "Drop based Technologies" = "#ff7f00",
+  "Plate based Technologies" = "#cab2d6"
+)
+
+dataset_summary <- cell_metadata |>
+  filter(alive) |>
+  summarise(alive_cells = n(), .by = c(dataset_id, donor_id)) |>
+  summarise(
+    num_donor = n_distinct(donor_id),
+    avg_alive_cells = mean(alive_cells),
+    .by = dataset_id
+  ) |>
+  collect()
+
+label_data <- dataset_summary |>
+  filter(
+    num_donor == max(num_donor) |
+      (num_donor == min(num_donor) &
+        avg_alive_cells == min(avg_alive_cells)) |
+      dataset_id == "39ed7d98-676d-4b8d-9d0a-0f3b60914ead"
+  ) |>
+  left_join(
+     cellNexus:::get_cellxgene_metadata("dataset") |>
+       select(dataset_id, explorer_url),
+     by = "dataset_id",
+     copy = TRUE) |>
+  mutate(
+    author = case_when(
+      str_detect(explorer_url, "d567b692-c374-4628-a508-8008f6778f22") ~
+        "Kanemaru et al.",
+      str_detect(explorer_url, "3faad104-2ab8-4434-816d-474d8d2641db") ~
+        "Yazar et al.",
+      str_detect(explorer_url, "2c820d53-cbd7-4e0a-be7a-a0ad1989a98f") ~
+        "Scale Biosciences, Inc.",
+      str_detect(explorer_url, "39ed7d98-676d-4b8d-9d0a-0f3b60914ead") ~
+        "Smith, R. S. et al."
+    )
+  )
+
+dataset_technology <- cell_metadata |>
+  distinct(dataset_id, assay_groups) |>
+  collect() |>
+  group_by(dataset_id) |>
+  mutate(
+    assay_groups = if_else(
+      n_distinct(assay_groups) > 1,
+      "Multi-technologies",
+      first(assay_groups)
+    )
+  ) |>
+  ungroup() |>
+  distinct()
+
+label_ids <- unique(label_data$dataset_id)
+
+alive_per_donor_scatter <- dataset_summary |>
+  left_join(label_data |> select(dataset_id, author), by = "dataset_id") |>
+  left_join(dataset_technology, by = "dataset_id") |>
+  mutate(author = coalesce(author, "")) |>
+  ggplot(aes(
+    x = num_donor,
+    y = avg_alive_cells,
+    group = author,
+    color = assay_groups
+  )) +
+  geom_point(size = 0.1) +
+  geom_point(
+    data = \(data) filter(data, dataset_id %in% label_ids),
+    aes(x = num_donor, y = avg_alive_cells),
+    inherit.aes = FALSE,
+    color = "black",
+    size = 1
+  ) +
+  geom_text_repel(
+    data = label_data,
+    aes(label = author),
+    color = "black",
+    size = 2,
+    box.padding = 0.8,
+    segment.color = "grey50",
+    max.overlaps = Inf
+  ) +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(
+    values = technology_colors,
+    guide = guide_legend(nrow = 3)
+  ) +
+  labs(
+    x = "Donor Count",
+    y = "Average Number of Alive Cells per Donor",
+    color = "Technology"
+  ) +
+  theme_multipanel +
+  theme(
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 5),
+    legend.key.height = unit(0.05, "cm"),
+    legend.key.width = unit(0.05, "cm")
+  )
+
+alive_per_donor_scatter
+```
+
+## Panel D: Sample library-size distributions by technology
+
+Panel D shows the distribution of total library size per sample for each
+technology. The logarithmic x-axis accommodates the broad range of library
+sizes, while the gradient encodes the log-density within each ridgeline.
+
+```{r}
+#| label: fig-panel-d
+#| fig-cap: "Distribution of total library size per sample across sequencing technologies. Curves are coloured by log10-transformed peak density and ordered by median library size from top to bottom."
+#| fig-width: 8
+#| fig-height: 5
+
+library_size_data <- cell_metadata |>
+  summarise(
+    total_library_size = sum(nCount_RNA, na.rm = TRUE),
+    n_cells = n(),
+    .by = c(assay_shorten, sample_id)
+  ) |>
+  collect()
+
+density_peaks <- library_size_data |>
+  mutate(log_total_library_size = log10(total_library_size)) |>
+  group_by(assay_shorten) |>
+  summarise(
+    peak = list({
+      density_estimate <- density(log_total_library_size, na.rm = TRUE)
+      tibble(x = density_estimate$x, y = density_estimate$y) |>
+        slice_max(y, n = 1, with_ties = FALSE)
+    }),
+    .groups = "drop"
+  ) |>
+  unnest(peak)
+
+p_library_size <- library_size_data |>
+  left_join(density_peaks, by = "assay_shorten") |>
+  mutate(log_density_peak = log10(y)) |>
+  ggplot(aes(
+    x = total_library_size,
+    y = reorder(assay_shorten, total_library_size, decreasing = TRUE, FUN = mean),
+    fill = log_density_peak
+  )) +
+  geom_density_ridges_gradient(scale = 1.5, linewidth = 0.1) +
+  scale_x_log10(labels = scales::label_log()) +
+  scale_fill_viridis_c(
+    name = expression(log[10] * "(Density Peak)"),
+    option = "D",
+    guide = guide_colorbar(title.position = "top", title.hjust = 0.5)
+  ) +
+  labs(x = "Total Library Size per Sample", y = NULL) +
+  theme_multipanel +
+  theme(
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 4),
+    legend.key.height = unit(0.2, "cm"),
+    legend.key.width = unit(0.3, "cm")
+  )
+
+p_library_size
+```
+
+## Assemble Figure 2
+
+The final layout places the paired alluvial diagrams above the dataset-scale
+and library-size panels, with the demographic panel occupying the right side.
+
+```{r}
+#| label: fig-figure-2
+#| fig-cap: "Figure 2: composition, demographic coverage, dataset scale, and sample library size of the cellNexus resource."
+#| fig-width: 7.2
+#| fig-height: 9.1
+
+ggsave(
+  filename = "tissue_disease_alluvial.pdf",
+  plot = tissue_disease_alluvial,
+  width = 90,
+  height = 150,
+  units = "mm"
+)
+
+alluvial <- (tissue_assay_alluvial + tissue_disease_alluvial) +
+  plot_layout(widths = c(1, 1)) &
+  theme(legend.position = "none")
+
+left_bottom <- (alive_per_donor_scatter + p_library_size) +
+  plot_layout(guides = "collect", widths = c(1, 1))
+
+plot_left <- alluvial / plot_spacer() / left_bottom +
+  plot_layout(heights = c(5, 0.01, 2))
+
+figure_2 <- (plot_left | age_sex_ethnicity_tissue_bar) +
+  plot_layout(guides = "auto", widths = c(57, 40)) &
+  theme(
+    plot.margin = margin(0, 0, 0, 0, "pt"),
+    panel.spacing = unit(0, "cm"),
+    legend.position = "bottom",
+    legend.key.size = unit(0.2, "cm"),
+    legend.text = element_text(margin = margin(r = 1, l = 1)),
+    legend.margin = margin(t = 0, b = 0, l = -1, r = 2)
+  )
+
+# ggsave(
+#   filename = here("quality_control/Figure2_dataset_content.pdf"),
+#   plot = figure_2,
+#   width = 183,
+#   height = 230,
+#   units = "mm",
+#   dpi = 600
+# )
+
+figure_2
+```
