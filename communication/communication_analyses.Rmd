@@ -14,6 +14,14 @@ job::job({
     library(crew)
     library(crew.cluster)
     
+    if (!requireNamespace("cellNexus", quietly = TRUE)) {
+      stop(
+        "cellNexus is not installed. Please install it from GitHub:\n",
+        "  remotes::install_github('MangiolaLaboratory/cellNexus')",
+        call. = FALSE
+      )
+    }
+    
     # # Set file path 
     # hdf5_path = "/hpcfs/groups/phoenix-hpc-mangiola_laboratory/Mangiola_ImmuneAtlas/taskforce_shared_folder/pseudobulk_sample_is_immune"
     # metadata_path = "/hpcfs/groups/phoenix-hpc-mangiola_laboratory/Mangiola_ImmuneAtlas/taskforce_shared_folder/cell_metadata_1_0_6_sccomp_input_counts.rds"
@@ -672,13 +680,8 @@ job::job({
     
           prepare_data_for_brms = function(source, target, pathway_name){
         
-        con = 
-            duckdb::duckdb() |> 
-            dbConnect(dbdir = cellchat_file, read_only = TRUE)
-          
           data =  
-            con |> 
-            tbl("lr_pathway_table") |> 
+            cellchat_file |> 
             
             # Filter data
             filter(source == source, target == target, pathway_name == pathway_name) |> 
@@ -693,8 +696,6 @@ job::job({
             
             as_tibble() |> 
             droplevels() 
-          
-          dbDisconnect(con, shutdown = TRUE)
           
           # Skip if not enought samples
           if(data |> distinct(sample_id) |> nrow() < 100) return(NULL)
@@ -719,8 +720,17 @@ job::job({
       # selects a reference sample, and performs normalisation and scaling.
       tar_target(
         cellchat_file,
-        "cellNexus_lr_signaling_pathway_strength.duckdb",
-        format = "file"
+        {
+          if (!requireNamespace("cellNexus", quietly = TRUE)) {
+            stop(
+              "cellNexus is not installed. Please install it from GitHub:\n",
+              "  remotes::install_github('MangiolaLaboratory/cellNexus')",
+              call. = FALSE
+            )
+          }
+          cellNexus::get_cell_communication_strength()
+        },
+        packages = c("cellNexus", "dplyr", "dbplyr", "duckdb")
       ),
       tar_target(
         ethnicity_imputed,
@@ -737,9 +747,7 @@ job::job({
         cell_pathway_combination,
         {
           comb = 
-            duckdb::duckdb() |> 
-            dbConnect(dbdir = cellchat_file)    |> 
-            tbl("lr_pathway_table") |> 
+            cellchat_file |> 
             
             # drop cells I dont want
             filter(!source %in% cell_to_exclude & !target %in% cell_to_exclude) |>  
@@ -769,7 +777,7 @@ job::job({
             tar_group()
         }, 
         iteration = "group",
-        packages = c("dbplyr", "duckdb", "cellNexus", "tarchetypes"),
+        packages = c("dplyr", "tidyr", "dbplyr", "duckdb", "cellNexus", "tarchetypes"),
         resources = tar_resources(crew = tar_resources_crew("elastic_5"))
       ),
 
@@ -855,7 +863,7 @@ job::job({
           
         }, .progress = TRUE)), 
         pattern = map(cell_pathway_combination),
-        packages = c( "brms", "glue", "stringr", "dplyr", "purrr"),
+        packages = c("brms", "glue", "stringr", "dplyr", "purrr", "cellNexus", "dbplyr", "duckdb"),
         resources = tar_resources(crew = tar_resources_crew("elastic_5"))
         , cue = tar_cue(mode = "never")
         
@@ -1089,15 +1097,7 @@ job::job({
     unnest(hypothesis_age_monotonic) |> 
     
     left_join(
-      duckdb::duckdb() |>
-        dbConnect(dbdir =
-                    tar_read(
-                      cellchat_file,
-                      store ="cellchat_brms_1_6_12_c/_targets"
-                    ),
-                  read_only = TRUE
-        )    |>
-        tbl("lr_pathway_table") |> 
+      cellNexus::get_cell_communication_strength() |>
         summarise(
           sample_size = n(), 
           average_interaction_count = mean(interaction_count), 
